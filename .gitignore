@@ -16,3 +16,6 @@ frontend/node_modules/
 frontend/.next/
 frontend/out/
 
+# Release package
+SVN_AI_Review_V2.0.zip
+

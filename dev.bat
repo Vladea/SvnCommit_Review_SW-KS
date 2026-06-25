@@ -3,7 +3,7 @@ setlocal
 cd /d %~dp0
 
 echo ============================================
-echo   SVN AI Review V2.0 - 开发模式
+echo   SVN AI Review V2.0 - DEV MODE
 echo ============================================
 echo.
 
@@ -37,7 +37,7 @@ if not exist "frontend\node_modules" (
 echo [4/4] Starting servers...
 echo.
 echo   Backend  : http://127.0.0.1:8000
-echo   Frontend : http://localhost:3000  (via Next.js HMR)
+echo   Frontend : http://localhost:3000  (Next.js HMR)
 echo.
 
 start "SVN AI Review - Backend" ".venv\Scripts\python.exe" -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload

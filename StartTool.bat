@@ -36,7 +36,7 @@ if not exist ".venv\Scripts\python.exe" (
 
 if not exist "app\static\index.html" (
     echo [WARNING] app/static/index.html not found.
-    echo Run "构建发布.bat" first to build the frontend.
+    echo Run Build-Release.bat first to build the frontend.
     echo.
 )
 
