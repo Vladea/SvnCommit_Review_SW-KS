@@ -15,10 +15,6 @@ TIMEZONE_NAME = os.getenv('TIMEZONE', 'Asia/Shanghai')
 LOCAL_OFFSET = int(os.getenv('LOCAL_TIMEZONE_OFFSET_HOURS', '8'))
 LOCAL_TZ = timezone(timedelta(hours=LOCAL_OFFSET))
 TEAMS_WEBHOOK_URL = os.getenv('TEAMS_WEBHOOK_URL', '')
-LLM_PROVIDER = os.getenv('LLM_PROVIDER', 'mock')
-LLM_API_BASE = os.getenv('LLM_API_BASE', '')
-LLM_API_KEY = os.getenv('LLM_API_KEY', '')
-LLM_MODEL = os.getenv('LLM_MODEL', '')
 SVN_USERNAME = os.getenv('SVN_USERNAME', '')
 SVN_PASSWORD = os.getenv('SVN_PASSWORD', '')
 
@@ -50,6 +46,14 @@ def default_cfg():
                 'backoff': 2
             }
         },
+        'llm': {
+            'default': '',
+            'fallback': '',
+            'concurrent': 3,
+            'retry_count': 2,
+            'retry_delay': 5,
+            'providers': []
+        },
         'projects': []
     }
 
@@ -61,6 +65,10 @@ def load_cfg():
     cfg = yaml.safe_load(p.read_text(encoding='utf-8')) or default_cfg()
     cfg.setdefault('schedule', {'enabled': True, 'hour': 18, 'minute': 0})
     cfg.setdefault('scan', {})
+    cfg.setdefault('llm', {
+        'default': '', 'fallback': '', 'concurrent': 3,
+        'retry_count': 2, 'retry_delay': 5, 'providers': []
+    })
     cfg.setdefault('projects', [])
     for prj in cfg.get('projects', []):
         prj.pop('branch', None)
@@ -108,3 +116,54 @@ def auth_args():
     if SVN_PASSWORD:
         args += ['--password', SVN_PASSWORD]
     return args
+
+
+def llm_cfg():
+    lc = load_cfg().get('llm', {})
+    lc.setdefault('default', '')
+    lc.setdefault('fallback', '')
+    lc.setdefault('concurrent', 3)
+    lc.setdefault('retry_count', 2)
+    lc.setdefault('retry_delay', 5)
+    lc.setdefault('providers', [])
+    return lc
+
+
+def llm_providers():
+    return llm_cfg().get('providers', [])
+
+
+def get_active_llm_provider():
+    cfg = llm_cfg()
+    providers = cfg.get('providers', [])
+    default_id = cfg.get('default', '')
+
+    for p in providers:
+        if p.get('enabled') and p.get('id') == default_id:
+            api_key = os.getenv(p.get('api_key_ref', ''), '')
+            if api_key or not p.get('api_key_ref'):
+                return p
+
+    for p in providers:
+        if p.get('enabled') and p.get('id') != default_id:
+            api_key = os.getenv(p.get('api_key_ref', ''), '')
+            if api_key or not p.get('api_key_ref'):
+                return p
+
+    return None
+
+
+def save_llm_providers(providers):
+    cfg = load_cfg()
+    cfg.setdefault('llm', {})
+    cfg['llm']['providers'] = providers
+    save_cfg(cfg)
+
+
+def save_llm_settings(settings):
+    cfg = load_cfg()
+    cfg.setdefault('llm', {})
+    for key in ('default', 'fallback', 'concurrent', 'retry_count', 'retry_delay'):
+        if key in settings:
+            cfg['llm'][key] = settings[key]
+    save_cfg(cfg)
