@@ -1,81 +1,81 @@
 timezone: Asia/Shanghai
 schedule:
   entries:
-    - hour: 18
-      minute: 0
-      enabled: true
-      notify_teams: true
-      notify_email: false
+  - hour: 18
+    minute: 0
+    enabled: true
+    notify_teams: true
+    notify_email: false
 scan:
   max_diff_chars_per_file: 12000
   include_extensions:
-    - ".c"
-    - ".h"
-    - ".cpp"
-    - ".hpp"
-    - ".py"
-    - ".asl"
-    - ".inf"
-    - ".dsc"
-    - ".dec"
-    - ".vfr"
-    - ".uni"
-    - ".xml"
-    - ".json"
-    - ".yaml"
-    - ".yml"
+  - .c
+  - .h
+  - .cpp
+  - .hpp
+  - .py
+  - .asl
+  - '.inf'
+  - .dsc
+  - .dec
+  - .vfr
+  - .uni
+  - .xml
+  - .json
+  - .yaml
+  - .yml
   exclude_paths:
-    - "third_party/"
-    - "vendor/"
-    - "build/"
-    - "output/"
-    - "docs/"
+  - third_party/
+  - vendor/
+  - build/
+  - output/
+  - docs/
   rules:
     merge_conflict: true
     todo_marker: true
     debug_print: true
     memory_safety: true
 llm:
-  default: ""
-  fallback: ""
+  default: ''
+  fallback: ''
   concurrent: 3
   retry_count: 2
   retry_delay: 5
   providers:
-    - id: deepseek_free
-      name: "DeepSeek Chat（免费）"
-      type: openai_compatible
-      api_base: "https://api.deepseek.com/v1"
-      api_key_ref: "DEEPSEEK_API_KEY"
-      model: "deepseek-chat"
-      enabled: false
-      description: "国产免费模型，每日 500 万 token 额度"
-    - id: ollama_local
-      name: "Ollama 本地模型"
-      type: openai_compatible
-      api_base: "http://localhost:11434/v1"
-      api_key_ref: ""
-      model: "qwen2.5-coder:7b"
-      enabled: false
-      description: "本地部署，完全免费，适合内网环境"
-    - id: openai_gpt4o
-      name: "OpenAI GPT-4o（付费）"
-      type: openai_compatible
-      api_base: "https://api.openai.com/v1"
-      api_key_ref: "OPENAI_API_KEY"
-      model: "gpt-4o"
-      enabled: false
-      description: "最强大的通用模型，审查质量最高"
+  - id: deepseek_free
+    name: DeepSeek Chat（免费）
+    type: openai_compatible
+    api_base: https://api.deepseek.com/v1
+    api_key_ref: DEEPSEEK_API_KEY
+    model: deepseek-chat
+    enabled: false
+    description: 国产免费模型，每日 500 万 token 额度
+  - id: ollama_local
+    name: Ollama 本地模型
+    type: openai_compatible
+    api_base: http://localhost:11434/v1
+    api_key_ref: ''
+    model: qwen2.5-coder:7b
+    enabled: false
+    description: 本地部署，完全免费，适合内网环境
+  - id: openai_gpt4o
+    name: OpenAI GPT-4o（付费）
+    type: openai_compatible
+    api_base: https://api.openai.com/v1
+    api_key_ref: OPENAI_API_KEY
+    model: gpt-4o
+    enabled: false
+    description: 最强大的通用模型，审查质量最高
 notifications:
   teams:
     enabled: true
-    webhook_url_ref: "TEAMS_WEBHOOK_URL"
+    webhook_url_ref: TEAMS_WEBHOOK_URL
   email:
     enabled: false
-    smtp_host: ""
+    smtp_host: ''
     smtp_port: 587
-    smtp_user: ""
-    smtp_password_ref: "EMAIL_SMTP_PASSWORD"
-    from_addr: ""
+    smtp_user: ''
+    smtp_password_ref: EMAIL_SMTP_PASSWORD
+    from_addr: ''
     to_addrs: []
 projects: []

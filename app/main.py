@@ -1,8 +1,10 @@
 import logging
+import os
+from pathlib import Path
 
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, Request, Response
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 
 from app.config import APP_HOST, APP_PORT
 from app.database import init_db
@@ -13,14 +15,16 @@ from app.scheduler import scheduler, reload_schedule
 logger = setup_logging()
 
 app = FastAPI(title='SVN AI Review V2.0', version='2.0.0')
-app.mount('/static', StaticFiles(directory='app/static'), name='static')
+app.mount('/_next', StaticFiles(directory='app/static/_next'), name='next')
 app.include_router(api_router)
+
+STATIC_DIR = Path('app/static')
 
 
 @app.get('/')
 def index(response: Response):
     response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
-    return FileResponse('app/static/index.html', headers={
+    return FileResponse(STATIC_DIR / 'index.html', headers={
         'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0'
     })
 
@@ -28,6 +32,25 @@ def index(response: Response):
 @app.get('/api/health')
 def health():
     return {'status': 'ok', 'version': '2.0.0'}
+
+
+@app.get('/{page:path}')
+def serve_page(page: str, request: Request):
+    path = page.strip('/')
+    if path.startswith('api/') or path.startswith('_next/'):
+        return HTMLResponse('Not Found', status_code=404)
+
+    html_path = STATIC_DIR / (path or '.') / 'index.html' if path else STATIC_DIR / 'index.html'
+    if not html_path.exists() and '/' not in path:
+        html_path = STATIC_DIR / path / 'index.html'
+
+    if html_path.exists():
+        return FileResponse(html_path)
+
+    not_found = STATIC_DIR / '404.html'
+    if not_found.exists():
+        return FileResponse(not_found, status_code=404)
+    return HTMLResponse('Not Found', status_code=404)
 
 
 @app.on_event('startup')

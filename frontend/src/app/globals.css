@@ -1,0 +1,21 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+  background: linear-gradient(135deg, #eaf2ff, #f7fbff);
+  color: #1f2937;
+}
+
+* { box-sizing: border-box; }
+
+@layer base {
+  table { width: 100%; border-collapse: collapse; background: white; border-radius: 12px; overflow: hidden; }
+  th, td { padding: 10px; border-bottom: 1px solid #edf2f7; text-align: left; font-size: 13px; vertical-align: top; }
+  th { background: #f1f5fb; color: #334155; }
+  pre { white-space: pre-wrap; background: #0f172a; color: #e5e7eb; border-radius: 14px; padding: 14px; max-height: 400px; overflow-y: auto; font-size: 13px; }
+  input, select { border: 1px solid #d8e1ef; border-radius: 10px; padding: 11px; background: white; font-size: 14px; }
+  input:focus, select:focus { outline: 2px solid #2563eb; outline-offset: -1px; }
+}
