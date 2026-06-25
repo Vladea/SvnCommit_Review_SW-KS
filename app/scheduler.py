@@ -11,19 +11,21 @@ scheduler = BackgroundScheduler(timezone=TIMEZONE_NAME)
 
 
 def reload_schedule():
-    cfg = schedule_cfg()
-    try:
-        scheduler.remove_job('daily_svn_review')
-    except Exception:
-        pass
-    if cfg.get('enabled', True):
-        scheduler.add_job(
-            run_daily_job, 'cron',
-            hour=int(cfg.get('hour', 18)),
-            minute=int(cfg.get('minute', 0)),
-            id='daily_svn_review',
-            replace_existing=True
-        )
-        logger.info(f'Schedule reloaded: daily at {cfg.get("hour", 18):02d}:{cfg.get("minute", 0):02d}')
-    else:
-        logger.info('Schedule disabled')
+    for job in scheduler.get_jobs():
+        if job.id.startswith('daily_svn_review'):
+            scheduler.remove_job(job.id)
+
+    entries = schedule_cfg()
+    for i, entry in enumerate(entries):
+        if entry.get('enabled', True):
+            job_id = f'daily_svn_review_{i}'
+            scheduler.add_job(
+                run_daily_job, 'cron',
+                hour=int(entry.get('hour', 18)),
+                minute=int(entry.get('minute', 0)),
+                id=job_id,
+                replace_existing=True
+            )
+            logger.info(f'Schedule [{job_id}] added: daily at {entry.get("hour", 18):02d}:{entry.get("minute", 0):02d}')
+    if not any(e.get('enabled', True) for e in entries):
+        logger.info('All schedule entries disabled')

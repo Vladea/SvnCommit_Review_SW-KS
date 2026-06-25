@@ -63,13 +63,19 @@ def load_cfg():
     if not p.exists():
         p.write_text(yaml.safe_dump(default_cfg(), allow_unicode=True, sort_keys=False), encoding='utf-8')
     cfg = yaml.safe_load(p.read_text(encoding='utf-8')) or default_cfg()
-    cfg.setdefault('schedule', {'enabled': True, 'hour': 18, 'minute': 0})
+    cfg.setdefault('schedule', {'entries': [{'hour': 18, 'minute': 0, 'enabled': True, 'notify_teams': True, 'notify_email': False}]})
     cfg.setdefault('scan', {})
     cfg.setdefault('llm', {
         'default': '', 'fallback': '', 'concurrent': 3,
         'retry_count': 2, 'retry_delay': 5, 'providers': []
     })
+    cfg.setdefault('notifications', {
+        'teams': {'enabled': True, 'webhook_url_ref': 'TEAMS_WEBHOOK_URL'},
+        'email': {'enabled': False, 'smtp_host': '', 'smtp_port': 587, 'smtp_user': '',
+                   'smtp_password_ref': 'EMAIL_SMTP_PASSWORD', 'from_addr': '', 'to_addrs': []}
+    })
     cfg.setdefault('projects', [])
+    _migrate_schedule(cfg)
     for prj in cfg.get('projects', []):
         prj.pop('branch', None)
         prj.setdefault('scan_window_days', 1)
@@ -77,6 +83,17 @@ def load_cfg():
         prj.setdefault('owner_group', '')
         prj.setdefault('teams_webhook_url', '')
     return cfg
+
+
+def _migrate_schedule(cfg):
+    sc = cfg.get('schedule', {})
+    if 'entries' not in sc and 'hour' in sc:
+        sc['entries'] = [{
+            'hour': sc.get('hour', 18), 'minute': sc.get('minute', 0),
+            'enabled': sc.get('enabled', True),
+            'notify_teams': True, 'notify_email': False
+        }]
+        sc.pop('hour', None); sc.pop('minute', None); sc.pop('enabled', None)
 
 
 def save_cfg(cfg):
@@ -101,7 +118,23 @@ def scan_cfg():
 
 
 def schedule_cfg():
-    return load_cfg().get('schedule', {'enabled': True, 'hour': 18, 'minute': 0})
+    sc = load_cfg().get('schedule', {})
+    _migrate_schedule(load_cfg())
+    return sc.get('entries', [{'hour': 18, 'minute': 0, 'enabled': True, 'notify_teams': True, 'notify_email': False}])
+
+
+def notification_cfg():
+    nc = load_cfg().get('notifications', {})
+    nc.setdefault('teams', {'enabled': True, 'webhook_url_ref': 'TEAMS_WEBHOOK_URL'})
+    nc.setdefault('email', {'enabled': False, 'smtp_host': '', 'smtp_port': 587, 'smtp_user': '',
+                             'smtp_password_ref': 'EMAIL_SMTP_PASSWORD', 'from_addr': '', 'to_addrs': []})
+    return nc
+
+
+def rule_cfg():
+    sc = load_cfg().get('scan', {})
+    sc.setdefault('rules', {'merge_conflict': True, 'todo_marker': True, 'debug_print': True, 'memory_safety': True})
+    return sc['rules']
 
 
 def retry_cfg():

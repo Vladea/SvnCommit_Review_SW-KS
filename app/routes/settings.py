@@ -2,9 +2,11 @@ from fastapi import APIRouter, HTTPException
 
 from app.config import (
     load_cfg, save_cfg,
-    llm_providers, save_llm_providers, save_llm_settings, llm_cfg
+    llm_providers, save_llm_providers, save_llm_settings, llm_cfg,
+    notification_cfg, rule_cfg
 )
 from app.schemas.llm import LLMProviderRequest, LLMSettingsRequest
+from app.services.notifier import test_teams_connection, test_email_connection
 
 router = APIRouter(prefix='/settings', tags=['settings'])
 
@@ -114,3 +116,42 @@ def get_llm_settings():
 def update_llm_settings(req: LLMSettingsRequest):
     save_llm_settings(req.model_dump())
     return req.model_dump()
+
+
+@router.get('/notifications')
+def get_notifications():
+    return notification_cfg()
+
+
+@router.put('/notifications')
+def update_notifications(settings: dict):
+    cfg = load_cfg()
+    cfg['notifications'] = settings
+    save_cfg(cfg)
+    return cfg['notifications']
+
+
+@router.post('/notifications/teams/test')
+def test_teams():
+    ok, msg = test_teams_connection()
+    return {'ok': ok, 'msg': msg}
+
+
+@router.post('/notifications/email/test')
+def test_email():
+    ok, msg = test_email_connection()
+    return {'ok': ok, 'msg': msg}
+
+
+@router.get('/rules')
+def get_rules():
+    return rule_cfg()
+
+
+@router.put('/rules')
+def update_rules(rules: dict):
+    cfg = load_cfg()
+    cfg.setdefault('scan', {})
+    cfg['scan']['rules'] = rules
+    save_cfg(cfg)
+    return cfg['scan']['rules']

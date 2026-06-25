@@ -1,14 +1,14 @@
+import json
 import logging
-from datetime import datetime, timedelta
 
 from app.database import session
-from app.config import enabled_projects, scan_cfg, LOCAL_TZ
+from app.config import enabled_projects, scan_cfg, LOCAL_TZ, notification_cfg
 from app.models import SvnCommit, ReviewIssue
 from app.services.svn_client import svn_logs, filter_logs_by_real_commit_date, svn_diff_safe, split_diff, should_review
 from app.services.review.rule_engine import rule_review
 from app.services.review.llm import llm_review
 from app.services.report_builder import create_report
-from app.services.notifier import send_teams
+from app.services.notifier import send_notification
 from app.models.changed_file import ChangedFile
 
 logger = logging.getLogger('svn_ai_review')
@@ -119,10 +119,10 @@ def run_range(start_date, end_date, project_names=None, push=True):
             s.commit()
 
         if push:
-            ok, msg = send_teams(report.report_markdown)
-            report.teams_push_status = 'OK' if ok else msg
+            results = send_notification(report.report_markdown)
+            report.teams_push_status = json.dumps(results, ensure_ascii=False)
             s.commit()
-            logger.info(f'Report [{report.id}] Teams push: {report.teams_push_status}')
+            logger.info(f'Report [{report.id}] push result: {results}')
 
         logger.info(
             f'Scan complete: {len(new)} new commits, {len(matched_logs)} revisions, '
