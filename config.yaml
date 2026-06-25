@@ -1,0 +1,30 @@
+timezone: Asia/Shanghai
+schedule:
+  enabled: true
+  hour: 18
+  minute: 0
+scan:
+  max_diff_chars_per_file: 12000
+  include_extensions:
+    - ".c"
+    - ".h"
+    - ".cpp"
+    - ".hpp"
+    - ".py"
+    - ".asl"
+    - ".inf"
+    - ".dsc"
+    - ".dec"
+    - ".vfr"
+    - ".uni"
+    - ".xml"
+    - ".json"
+    - ".yaml"
+    - ".yml"
+  exclude_paths:
+    - "third_party/"
+    - "vendor/"
+    - "build/"
+    - "output/"
+    - "docs/"
+projects: []
