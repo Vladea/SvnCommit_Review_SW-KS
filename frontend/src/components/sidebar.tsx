@@ -15,7 +15,7 @@ const nav = [
 
 export function Sidebar({ collapsed }: { collapsed: boolean }) {
   const path = usePathname();
-  const current = path.replace(/\//g, '') || 'dashboard';
+  const current = (path || '').replace(/\//g, '') || 'dashboard';
 
   return (
     <aside className={`bg-sidebar border-r border-[#d8e1ef] shadow-lg flex flex-col transition-all ${collapsed ? 'w-16' : 'w-60'}`}>
