@@ -35,6 +35,11 @@ scan:
     todo_marker: true
     debug_print: true
     memory_safety: true
+  max_files_per_commit: 10
+  retry:
+    max_retries: 3
+    delay: 5
+    backoff: 2
 llm:
   default: ''
   fallback: ''

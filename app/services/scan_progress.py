@@ -6,6 +6,17 @@ from datetime import datetime, timedelta
 _store = {}
 _lock = threading.Lock()
 _EXPIRE = timedelta(hours=2)
+_CLEANUP_INTERVAL = 600
+
+
+def _periodic_cleanup():
+    while True:
+        time.sleep(_CLEANUP_INTERVAL)
+        _cleanup()
+
+
+_cleaner = threading.Thread(target=_periodic_cleanup, daemon=True)
+_cleaner.start()
 
 
 def create_id():

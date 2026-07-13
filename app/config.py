@@ -1,4 +1,6 @@
 import os
+import tempfile
+import logging
 from pathlib import Path
 from datetime import timezone, timedelta
 
@@ -25,57 +27,61 @@ if DATABASE_URL.startswith('sqlite:///./'):
     db_path = DATABASE_URL.replace('sqlite:///./', '')
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
+logger = logging.getLogger('svn_ai_review')
 
-def default_cfg():
-    return {
-        'timezone': 'Asia/Shanghai',
-        'schedule': {'enabled': True, 'hour': 18, 'minute': 0},
-        'scan': {
-            'max_diff_chars_per_file': 12000,
-            'include_extensions': [
-                '.c', '.h', '.cpp', '.hpp', '.py',
-                '.asl', '.inf', '.dsc', '.dec', '.vfr', '.uni',
-                '.xml', '.json', '.yaml', '.yml'
-            ],
-            'exclude_paths': [
-                'third_party/', 'vendor/', 'build/', 'output/', 'docs/'
-            ],
-            'retry': {
-                'max_retries': 3,
-                'delay': 5,
-                'backoff': 2
-            }
-        },
-        'llm': {
-            'default': '',
-            'fallback': '',
-            'concurrent': 3,
-            'retry_count': 2,
-            'retry_delay': 5,
-            'providers': []
-        },
-        'projects': []
-    }
-
-
-def load_cfg():
-    p = Path(CONFIG_PATH)
-    if not p.exists():
-        p.write_text(yaml.safe_dump(default_cfg(), allow_unicode=True, sort_keys=False), encoding='utf-8')
-    cfg = yaml.safe_load(p.read_text(encoding='utf-8')) or default_cfg()
-    cfg.setdefault('schedule', {'entries': [{'hour': 18, 'minute': 0, 'enabled': True, 'notify_teams': True, 'notify_email': False}]})
-    cfg.setdefault('scan', {})
-    cfg.setdefault('llm', {
+DEFAULTS = {
+    'timezone': 'Asia/Shanghai',
+    'schedule': {'entries': [
+        {'hour': 18, 'minute': 0, 'enabled': True, 'notify_teams': True, 'notify_email': False}
+    ]},
+    'scan': {
+        'max_diff_chars_per_file': 12000,
+        'max_files_per_commit': 10,
+        'include_extensions': [
+            '.c', '.h', '.cpp', '.hpp', '.py',
+            '.asl', '.inf', '.dsc', '.dec', '.vfr', '.uni',
+            '.xml', '.json', '.yaml', '.yml'
+        ],
+        'exclude_paths': [
+            'third_party/', 'vendor/', 'build/', 'output/', 'docs/'
+        ],
+        'rules': {'merge_conflict': True, 'todo_marker': True, 'debug_print': True, 'memory_safety': True},
+        'retry': {'max_retries': 3, 'delay': 5, 'backoff': 2},
+    },
+    'llm': {
         'default': '', 'fallback': '', 'concurrent': 3,
-        'retry_count': 2, 'retry_delay': 5, 'providers': []
-    })
-    cfg.setdefault('notifications', {
+        'retry_count': 2, 'retry_delay': 5, 'providers': [],
+    },
+    'notifications': {
         'teams': {'enabled': True, 'webhook_url_ref': 'TEAMS_WEBHOOK_URL'},
         'email': {'enabled': False, 'smtp_host': '', 'smtp_port': 587, 'smtp_user': '',
-                   'smtp_password_ref': 'EMAIL_SMTP_PASSWORD', 'from_addr': '', 'to_addrs': []}
-    })
-    cfg.setdefault('projects', [])
-    _migrate_schedule(cfg)
+                   'smtp_password_ref': 'EMAIL_SMTP_PASSWORD', 'from_addr': '', 'to_addrs': []},
+    },
+    'projects': [],
+}
+
+_cache = None
+_cache_mtime = 0.0
+
+
+def _deep_merge(default: dict, override: dict) -> dict:
+    for k, v in default.items():
+        if k not in override:
+            override[k] = v
+        elif isinstance(v, dict) and isinstance(override[k], dict):
+            _deep_merge(v, override[k])
+    return override
+
+
+def _normalize(cfg: dict) -> dict:
+    if cfg.get('schedule', {}).get('enabled') is not None and 'entries' not in cfg.get('schedule', {}):
+        sc = cfg['schedule']
+        sc['entries'] = [{
+            'hour': sc.pop('hour', 18), 'minute': sc.pop('minute', 0),
+            'enabled': sc.pop('enabled', True),
+            'notify_teams': True, 'notify_email': False,
+        }]
+
     for prj in cfg.get('projects', []):
         prj.pop('branch', None)
         prj.setdefault('scan_window_days', 1)
@@ -85,63 +91,79 @@ def load_cfg():
     return cfg
 
 
-def _migrate_schedule(cfg):
-    sc = cfg.get('schedule', {})
-    if 'entries' not in sc and 'hour' in sc:
-        sc['entries'] = [{
-            'hour': sc.get('hour', 18), 'minute': sc.get('minute', 0),
-            'enabled': sc.get('enabled', True),
-            'notify_teams': True, 'notify_email': False
-        }]
-        sc.pop('hour', None); sc.pop('minute', None); sc.pop('enabled', None)
+def _invalidate_cache():
+    global _cache, _cache_mtime
+    _cache = None
+    _cache_mtime = 0.0
 
 
-def save_cfg(cfg):
+def load_cfg() -> dict:
+    global _cache, _cache_mtime
+    p = Path(CONFIG_PATH)
+    mtime = p.stat().st_mtime if p.exists() else 0.0
+
+    if _cache is not None and mtime <= _cache_mtime:
+        return _cache
+
+    if not p.exists():
+        p.write_text(yaml.safe_dump(DEFAULTS, allow_unicode=True, sort_keys=False), encoding='utf-8')
+
+    try:
+        raw = yaml.safe_load(p.read_text(encoding='utf-8'))
+    except yaml.YAMLError as e:
+        logger.error(f'Config parse error: {e}. Using defaults.')
+        raw = None
+
+    cfg = _deep_merge(dict(DEFAULTS), raw) if raw else dict(DEFAULTS)
+    _normalize(cfg)
+    _cache = cfg
+    _cache_mtime = mtime
+    return cfg
+
+
+def save_cfg(cfg: dict):
+    global _cache, _cache_mtime
     for prj in cfg.get('projects', []):
         prj.pop('branch', None)
-    Path(CONFIG_PATH).write_text(
-        yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False), encoding='utf-8'
-    )
+    yaml_text = yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False)
+    p = Path(CONFIG_PATH)
+    fd, tmp = tempfile.mkstemp(dir=p.parent, prefix='.config_', suffix='.tmp')
+    try:
+        os.write(fd, yaml_text.encode('utf-8'))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(tmp, str(p))
+    _cache = cfg
+    _cache_mtime = p.stat().st_mtime
 
 
-def enabled_projects():
+def enabled_projects() -> list[dict]:
     return [p for p in load_cfg().get('projects', []) if p.get('enabled')]
 
 
-def scan_cfg():
-    sc = load_cfg().get('scan', {})
-    sc.setdefault('max_diff_chars_per_file', 12000)
-    sc.setdefault('include_extensions', [])
-    sc.setdefault('exclude_paths', [])
-    sc.setdefault('retry', {'max_retries': 3, 'delay': 5, 'backoff': 2})
-    return sc
+def scan_cfg() -> dict:
+    return load_cfg().get('scan', {})
 
 
-def schedule_cfg():
+def schedule_cfg() -> list[dict]:
     sc = load_cfg().get('schedule', {})
-    _migrate_schedule(load_cfg())
     return sc.get('entries', [{'hour': 18, 'minute': 0, 'enabled': True, 'notify_teams': True, 'notify_email': False}])
 
 
-def notification_cfg():
-    nc = load_cfg().get('notifications', {})
-    nc.setdefault('teams', {'enabled': True, 'webhook_url_ref': 'TEAMS_WEBHOOK_URL'})
-    nc.setdefault('email', {'enabled': False, 'smtp_host': '', 'smtp_port': 587, 'smtp_user': '',
-                             'smtp_password_ref': 'EMAIL_SMTP_PASSWORD', 'from_addr': '', 'to_addrs': []})
-    return nc
+def notification_cfg() -> dict:
+    return load_cfg().get('notifications', {})
 
 
-def rule_cfg():
-    sc = load_cfg().get('scan', {})
-    sc.setdefault('rules', {'merge_conflict': True, 'todo_marker': True, 'debug_print': True, 'memory_safety': True})
-    return sc['rules']
+def rule_cfg() -> dict:
+    return scan_cfg().get('rules', {})
 
 
-def retry_cfg():
+def retry_cfg() -> dict:
     return scan_cfg().get('retry', {'max_retries': 3, 'delay': 5, 'backoff': 2})
 
 
-def auth_args(url=''):
+def auth_args(url: str = '') -> list[str]:
     if url.startswith('file://'):
         return ['--non-interactive']
     args = ['--non-interactive', '--trust-server-cert-failures',
@@ -153,22 +175,15 @@ def auth_args(url=''):
     return args
 
 
-def llm_cfg():
-    lc = load_cfg().get('llm', {})
-    lc.setdefault('default', '')
-    lc.setdefault('fallback', '')
-    lc.setdefault('concurrent', 3)
-    lc.setdefault('retry_count', 2)
-    lc.setdefault('retry_delay', 5)
-    lc.setdefault('providers', [])
-    return lc
+def llm_cfg() -> dict:
+    return load_cfg().get('llm', {})
 
 
-def llm_providers():
+def llm_providers() -> list[dict]:
     return llm_cfg().get('providers', [])
 
 
-def get_active_llm_provider():
+def get_active_llm_provider() -> dict | None:
     cfg = llm_cfg()
     providers = cfg.get('providers', [])
     default_id = cfg.get('default', '')
@@ -188,14 +203,14 @@ def get_active_llm_provider():
     return None
 
 
-def save_llm_providers(providers):
+def save_llm_providers(providers: list[dict]):
     cfg = load_cfg()
     cfg.setdefault('llm', {})
     cfg['llm']['providers'] = providers
     save_cfg(cfg)
 
 
-def save_llm_settings(settings):
+def save_llm_settings(settings: dict):
     cfg = load_cfg()
     cfg.setdefault('llm', {})
     for key in ('default', 'fallback', 'concurrent', 'retry_count', 'retry_delay'):

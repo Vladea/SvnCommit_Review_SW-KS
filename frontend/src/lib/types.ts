@@ -10,6 +10,8 @@ export interface Project {
 export interface Report {
   id: number;
   date: string;
+  start_date: string;
+  end_date: string;
   repo_count: number;
   commit_count: number;
   file_count: number;
@@ -28,6 +30,7 @@ export interface Issue {
   author: string;
   level: string;
   type: string;
+  engine: string;
   file: string;
   desc: string;
   suggestion: string;

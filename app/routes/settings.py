@@ -6,6 +6,7 @@ from app.config import (
     notification_cfg, rule_cfg
 )
 from app.schemas.llm import LLMProviderRequest, LLMSettingsRequest
+from app.schemas.settings import ScanSettingsRequest, NotificationSettingsRequest, RulesSettingsRequest
 from app.services.notifier import test_teams_connection, test_email_connection
 
 router = APIRouter(prefix='/settings', tags=['settings'])
@@ -17,9 +18,9 @@ def get_scan_settings():
 
 
 @router.post('/scan')
-def update_scan_settings(settings: dict):
+def update_scan_settings(settings: ScanSettingsRequest):
     cfg = load_cfg()
-    cfg['scan'] = settings
+    cfg['scan'].update(settings.model_dump())
     save_cfg(cfg)
     return cfg['scan']
 
@@ -124,9 +125,9 @@ def get_notifications():
 
 
 @router.put('/notifications')
-def update_notifications(settings: dict):
+def update_notifications(settings: NotificationSettingsRequest):
     cfg = load_cfg()
-    cfg['notifications'] = settings
+    cfg['notifications'] = settings.model_dump()
     save_cfg(cfg)
     return cfg['notifications']
 
@@ -149,9 +150,9 @@ def get_rules():
 
 
 @router.put('/rules')
-def update_rules(rules: dict):
+def update_rules(rules: RulesSettingsRequest):
     cfg = load_cfg()
     cfg.setdefault('scan', {})
-    cfg['scan']['rules'] = rules
+    cfg['scan']['rules'] = rules.model_dump()
     save_cfg(cfg)
     return cfg['scan']['rules']

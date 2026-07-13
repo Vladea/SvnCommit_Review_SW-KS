@@ -57,12 +57,16 @@ def send_email(text, cfg=None):
         server.starttls()
         server.login(user, password)
         server.sendmail(from_addr, to_addrs, msg.as_string())
-        server.quit()
         logger.info(f'Email sent to {len(to_addrs)} recipients')
         return True, 'OK'
     except Exception as e:
         logger.error(f'Email notification error: {e}')
         return False, str(e)
+    finally:
+        try:
+            server.quit()
+        except Exception:
+            pass
 
 
 def send_notification(report_text, channels=None):

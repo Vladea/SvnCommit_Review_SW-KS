@@ -21,7 +21,7 @@ export default function IssuesPage() {
           {issues.map(i => (
             <tr key={i.id}>
               <td><Badge label={i.level} /></td>
-              <td><Badge label={i.type} /></td>
+              <td><Badge label={i.engine} /></td>
               <td>{i.project}</td>
               <td className="text-xs font-mono">{i.revision}</td>
               <td>{i.author}</td>

@@ -12,7 +12,9 @@ def list_reports():
     try:
         rows = s.query(DailyReport).order_by(DailyReport.id.desc()).limit(50).all()
         return [{
-            'id': r.id, 'date': r.report_date, 'repo_count': r.repo_count,
+            'id': r.id, 'date': r.report_date,
+            'start_date': r.start_date, 'end_date': r.end_date,
+            'repo_count': r.repo_count,
             'commit_count': r.commit_count, 'file_count': r.file_count,
             'author_count': r.author_count,
             'p1': r.p1_count, 'p2': r.p2_count, 'p3': r.p3_count, 'p4': r.p4_count,
@@ -27,6 +29,8 @@ def report_detail(rid: int):
     s = session()
     try:
         r = s.query(DailyReport).get(rid)
-        return {'id': r.id, 'report': r.report_markdown} if r else {}
+        if not r:
+            return {}
+        return {'id': r.id, 'report': r.report_markdown}
     finally:
         s.close()

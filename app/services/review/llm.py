@@ -32,7 +32,35 @@ class OpenAICompatibleClient:
             timeout=self.timeout
         )
         r.raise_for_status()
-        return r.json()['choices'][0]['message']['content']
+        data = r.json()
+        try:
+            return data['choices'][0]['message']['content']
+        except (KeyError, IndexError, TypeError):
+            raise RuntimeError(f'Unexpected API response: {str(data)[:200]}')
+
+    @staticmethod
+    def _extract_json(text):
+        if not text:
+            return {}
+        start = text.find('{')
+        if start == -1:
+            return {}
+        depth = 0
+        for i in range(start, len(text)):
+            ch = text[i]
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[start:i + 1])
+                    except json.JSONDecodeError:
+                        return {}
+        try:
+            return json.loads(text[start:])
+        except json.JSONDecodeError:
+            return {}
 
     def review(self, project, rev, author, file_path, diff_text, commit_message):
         prompt = (
@@ -43,7 +71,7 @@ class OpenAICompatibleClient:
         )
         try:
             content = self._chat(prompt)
-            data = json.loads(re.search(r'\{.*\}', content, re.S).group(0))
+            data = self._extract_json(content)
         except Exception as e:
             logger.error(f'[{self.name}] Review failed for {file_path}: {e}')
             return []
@@ -84,7 +112,12 @@ class OpenAICompatibleClient:
             )
             elapsed = round((time.time() - start) * 1000)
             if r.status_code == 200:
-                return {'ok': True, 'elapsed_ms': elapsed, 'detail': r.json()['choices'][0]['message']['content'][:50]}
+                data = r.json()
+                try:
+                    detail = data['choices'][0]['message']['content'][:50]
+                except (KeyError, IndexError, TypeError):
+                    detail = str(data)[:200]
+                return {'ok': True, 'elapsed_ms': elapsed, 'detail': detail}
             return {'ok': False, 'elapsed_ms': elapsed, 'detail': f'HTTP {r.status_code}: {r.text[:200]}'}
         except Exception as e:
             elapsed = round((time.time() - start) * 1000)

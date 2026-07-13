@@ -14,7 +14,7 @@ def list_issues():
         return [{
             'id': x.id, 'project': x.project_name, 'revision': x.revision,
             'author': x.author, 'level': x.level, 'type': x.issue_type,
-            'file': x.file_path, 'desc': x.description,
+            'engine': x.engine_type, 'file': x.file_path, 'desc': x.description,
             'suggestion': x.suggestion, 'status': x.status
         } for x in rows]
     finally:

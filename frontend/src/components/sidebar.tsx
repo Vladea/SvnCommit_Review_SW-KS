@@ -1,6 +1,7 @@
 'use client';
 
 import { usePathname } from 'next/navigation';
+import Link from 'next/link';
 
 const nav = [
   { id: 'dashboard', label: '仪表盘', icon: '📊' },
@@ -27,7 +28,7 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
         {nav.map(({ id, label, icon }) => {
           const active = current === id;
           return (
-            <a
+            <Link
               key={id}
               href={`/${id === 'dashboard' ? '' : id}`}
               className={`flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium no-underline transition-colors
@@ -35,7 +36,7 @@ export function Sidebar({ collapsed }: { collapsed: boolean }) {
             >
               <span className="text-lg">{icon}</span>
               {!collapsed && label}
-            </a>
+            </Link>
           );
         })}
       </nav>

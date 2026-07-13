@@ -104,6 +104,25 @@ def create_report(s, start_date, end_date, touched_keys=None, matched_logs=None,
         f'P1：{counts["P1"]}，P2：{counts["P2"]}，P3：{counts["P3"]}，P4：{counts["P4"]}'
     ]
 
+    if issues:
+        lines += ['', '---', '\U0001f4cb 问题预览（按 P 级降序）']
+        display_levels = ['P1', 'P2', 'P3', 'P4']
+        shown = 0
+        for lv in display_levels:
+            lv_issues = [i for i in issues if i.level == lv]
+            if lv_issues:
+                lines.append(f'{lv} 共 {len(lv_issues)} 条：')
+                for iss in sorted(lv_issues, key=lambda x: x.file_path or '')[:30]:
+                    loc = f'r{iss.revision} [{iss.file_path}]' if iss.file_path else f'r{iss.revision}'
+                    lines.append(f'  [{iss.engine_type}] {loc}')
+                    if iss.description:
+                        lines.append(f'    \u2192 {iss.description[:120]}')
+                    shown += 1
+                if len(lv_issues) > 30:
+                    lines.append(f'  ... 还有 {len(lv_issues) - 30} 条')
+        if shown == 0:
+            lines.append('（暂无问题详情）')
+
     if skipped_logs:
         lines += [
             '\n\u2501' * 15,
@@ -125,6 +144,11 @@ def create_report(s, start_date, end_date, touched_keys=None, matched_logs=None,
     )
     s.add(report)
     s.flush()
+    report.report_markdown = report.report_markdown.replace(
+        '\U0001f4ca 代码审查报告（',
+        f'\U0001f4ca 代码审查报告 #{report.id}（',
+        1
+    )
 
     for a, v in am.items():
         total = v['P1'] + v['P2'] + v['P3'] + v['P4']
