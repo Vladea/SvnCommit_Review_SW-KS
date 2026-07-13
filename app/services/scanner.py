@@ -1,5 +1,8 @@
 import json
 import logging
+from datetime import datetime, timedelta
+
+from sqlalchemy.exc import IntegrityError
 
 from app.database import session
 from app.config import enabled_projects, scan_cfg, LOCAL_TZ, notification_cfg
@@ -14,13 +17,14 @@ from app.models.changed_file import ChangedFile
 logger = logging.getLogger('svn_ai_review')
 
 
-def run_range(start_date, end_date, project_names=None, push=True):
+def run_range(start_date, end_date, project_names=None, push=True, progress_callback=None, max_commits=None):
     s = session()
     new = []
     errors = []
     touched_keys = []
     matched_logs = []
     skipped_logs = []
+    scanned = 0
     try:
         projects = enabled_projects()
         if project_names:
@@ -28,6 +32,8 @@ def run_range(start_date, end_date, project_names=None, push=True):
 
         for p in projects:
             name = p.get('name', 'unknown')
+            if progress_callback:
+                progress_callback({'phase': 'fetching', 'project': name, 'revision': '', 'file': '', 'completed': 0, 'total': 0})
             try:
                 raw_logs = svn_logs(p['svn_url'], start_date, end_date)
                 logs, skipped = filter_logs_by_real_commit_date(raw_logs, start_date, end_date)
@@ -42,7 +48,11 @@ def run_range(start_date, end_date, project_names=None, push=True):
                 logger.error(f'Project [{name}] svn log error: {e}')
                 continue
 
+            total = len(logs)
             for log in logs:
+                if max_commits and scanned >= max_commits:
+                    break
+
                 rev = log.get('revision', '')
                 touched_keys.append((name, rev))
                 matched_logs.append({
@@ -52,7 +62,13 @@ def run_range(start_date, end_date, project_names=None, push=True):
                 })
 
                 if s.query(SvnCommit).filter_by(project_name=name, revision=rev).first():
+                    scanned += 1
+                    if progress_callback:
+                        progress_callback({'phase': 'scanning', 'project': name, 'revision': rev, 'file': '(skipped)', 'completed': scanned, 'total': total})
                     continue
+
+                if progress_callback:
+                    progress_callback({'phase': 'diffing', 'project': name, 'revision': rev, 'file': '', 'completed': scanned, 'total': total})
 
                 try:
                     raw = svn_diff_safe(p['svn_url'], rev)
@@ -61,9 +77,21 @@ def run_range(start_date, end_date, project_names=None, push=True):
                         'project': name, 'revision': rev, 'author': log.get('author', 'unknown'), 'error': str(e)
                     })
                     logger.error(f'Project [{name}] rev [{rev}] diff error: {e}')
+                    scanned += 1
+                    if progress_callback:
+                        progress_callback({'phase': 'scanning', 'project': name, 'revision': rev, 'file': '(error)', 'completed': scanned, 'total': total})
                     continue
 
                 diff_map = split_diff(raw)
+
+                max_files = int(scan_cfg().get('max_files_per_commit', 10))
+                if len(diff_map) > max_files:
+                    logger.info(f'Project [{name}] rev [{rev}] skipped: {len(diff_map)} files (>{max_files})')
+                    scanned += 1
+                    if progress_callback:
+                        progress_callback({'phase': 'scanning', 'project': name, 'revision': rev, 'file': f'(skipped, {len(diff_map)} files)', 'completed': scanned, 'total': total})
+                    continue
+
                 max_chars = int(scan_cfg().get('max_diff_chars_per_file', 12000))
                 c = SvnCommit(
                     project_name=name, branch='', revision=rev,
@@ -72,9 +100,17 @@ def run_range(start_date, end_date, project_names=None, push=True):
                     message=log.get('message', ''),
                     changed_file_count=len(diff_map)
                 )
-                s.add(c)
-                s.flush()
-                new.append(c)
+                try:
+                    s.add(c)
+                    s.flush()
+                    new.append(c)
+                except IntegrityError:
+                    s.rollback()
+                    logger.info(f'Project [{name}] rev [{rev}] already scanned, skipped')
+                    scanned += 1
+                    if progress_callback:
+                        progress_callback({'phase': 'scanning', 'project': name, 'revision': rev, 'file': '(already scanned)', 'completed': scanned, 'total': total})
+                    continue
 
                 for fp, diff in diff_map.items():
                     short = diff[:max_chars]
@@ -92,6 +128,9 @@ def run_range(start_date, end_date, project_names=None, push=True):
                         diff_size=len(short), need_review=need
                     ))
 
+                    if progress_callback:
+                        progress_callback({'phase': 'scanning', 'project': name, 'revision': rev, 'file': fp, 'completed': scanned, 'total': total})
+
                     if need:
                         try:
                             for issue in rule_review(name, rev, c.author, fp, short) + \
@@ -104,6 +143,10 @@ def run_range(start_date, end_date, project_names=None, push=True):
                             })
                             logger.error(f'Review failed for {name} r{rev} {fp}: {e}')
                 s.commit()
+                scanned += 1
+
+            if max_commits and scanned >= max_commits:
+                break
 
         report = create_report(s, start_date, end_date, touched_keys, matched_logs, skipped_logs)
         if errors:

@@ -141,7 +141,9 @@ def retry_cfg():
     return scan_cfg().get('retry', {'max_retries': 3, 'delay': 5, 'backoff': 2})
 
 
-def auth_args():
+def auth_args(url=''):
+    if url.startswith('file://'):
+        return ['--non-interactive']
     args = ['--non-interactive', '--trust-server-cert-failures',
             'unknown-ca,cn-mismatch,expired,not-yet-valid,other']
     if SVN_USERNAME:

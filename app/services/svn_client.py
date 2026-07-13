@@ -10,15 +10,18 @@ from app.config import auth_args, scan_cfg, retry_cfg, LOCAL_TZ
 logger = logging.getLogger('svn_ai_review')
 
 
-def run_cmd(args):
+def run_cmd(args, timeout=120):
     p = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                       text=True, encoding='utf-8', errors='ignore')
+                       text=True, encoding='utf-8', errors='ignore', timeout=timeout)
     if p.returncode != 0:
         raise RuntimeError(p.stderr.strip())
     return p.stdout
 
 
 def run_cmd_with_retry(args):
+    if any(str(a).startswith('file://') for a in args):
+        return run_cmd(args)
+
     rcfg = retry_cfg()
     max_retries = rcfg.get('max_retries', 3)
     delay = rcfg.get('delay', 5)
@@ -57,7 +60,7 @@ def parse_svn_time_to_local(text):
 def svn_logs(url, start_date, end_date):
     svn_end = end_date_plus_one(end_date)
     root = ET.fromstring(
-        run_cmd_with_retry(['svn', 'log', url, '-r', f'{{{start_date}}}:{{{svn_end}}}', '--xml'] + auth_args())
+        run_cmd_with_retry(['svn', 'log', url, '-r', f'{{{start_date}}}:{{{svn_end}}}', '--xml'] + auth_args(url))
     )
     logs = []
     for e in root.findall('logentry'):
@@ -95,9 +98,10 @@ def filter_logs_by_real_commit_date(logs, start_date, end_date):
 
 def svn_diff_safe(url, rev):
     last = ''
-    for u in [url, f'{url}@{rev}', f'{url}@HEAD']:
+    urls = [url] if url.startswith('file://') else [url, f'{url}@{rev}', f'{url}@HEAD']
+    for u in urls:
         try:
-            return run_cmd_with_retry(['svn', 'diff', u, '-c', rev] + auth_args())
+            return run_cmd_with_retry(['svn', 'diff', u, '-c', rev] + auth_args(url))
         except Exception as e:
             last = str(e)
     raise RuntimeError(last)
@@ -123,5 +127,5 @@ def should_review(path):
 
 
 def svn_info(url):
-    result = run_cmd_with_retry(['svn', 'info', url] + auth_args())
+    result = run_cmd_with_retry(['svn', 'info', url] + auth_args(url))
     return result

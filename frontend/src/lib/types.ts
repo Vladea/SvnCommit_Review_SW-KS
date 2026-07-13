@@ -101,3 +101,35 @@ export interface ScanResult {
   errors: Array<{ project: string; revision: string; author: string; error: string }>;
   report: string;
 }
+
+export interface ScanStartResponse {
+  scan_id: string;
+  total_commits: number;
+  matched_logs: ScanMatchedLog[];
+  skipped_logs: ScanMatchedLog[];
+  is_preview: boolean;
+  preview_triggered: boolean;
+}
+
+export interface ScanMatchedLog {
+  project: string;
+  revision: string;
+  author: string;
+  commit_date_local: string;
+  commit_time_local: string;
+  error?: string;
+}
+
+export interface ScanProgress {
+  status: string;
+  total_commits: number;
+  completed: number;
+  current_project: string;
+  current_revision: string;
+  current_file: string;
+  is_preview: boolean;
+  matched_logs: ScanMatchedLog[];
+  skipped_logs: ScanMatchedLog[];
+  result: ScanResult | null;
+  error: string | null;
+}
