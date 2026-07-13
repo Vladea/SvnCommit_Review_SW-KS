@@ -15,10 +15,11 @@ from app.scheduler import scheduler, reload_schedule
 logger = setup_logging()
 
 app = FastAPI(title='SVN AI Review V2.0', version='2.0.0')
-app.mount('/_next', StaticFiles(directory='app/static/_next'), name='next')
-app.include_router(api_router)
-
 STATIC_DIR = Path('app/static')
+STATIC_NEXT = STATIC_DIR / '_next'
+if STATIC_NEXT.exists():
+    app.mount('/_next', StaticFiles(directory=str(STATIC_NEXT)), name='next')
+app.include_router(api_router)
 
 
 @app.get('/')

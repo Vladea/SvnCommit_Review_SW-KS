@@ -106,7 +106,12 @@ def load_cfg() -> dict:
         return _cache
 
     if not p.exists():
-        p.write_text(yaml.safe_dump(DEFAULTS, allow_unicode=True, sort_keys=False), encoding='utf-8')
+        example = Path('config.example.yaml')
+        if example.exists():
+            import shutil
+            shutil.copy2(example, p)
+        else:
+            p.write_text(yaml.safe_dump(DEFAULTS, allow_unicode=True, sort_keys=False), encoding='utf-8')
 
     try:
         raw = yaml.safe_load(p.read_text(encoding='utf-8'))
