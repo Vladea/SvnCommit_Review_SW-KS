@@ -69,9 +69,9 @@ llm:
   - id: AAAA
     name: DeepseekT
     type: openai_compatible
-    api_base: https://api.deepseek.com‌
-    api_key_ref: sk-d4ea50e0770f4c0081832be0d27957c2
-    model: Deepseek
+    api_base: https://api.deepseek.com/v1
+    api_key_ref: DEEPSEEK_API_KEY
+    model: deepseek-chat
     enabled: true
     description: ''
 notifications:

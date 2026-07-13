@@ -12,7 +12,7 @@ logger = logging.getLogger('svn_ai_review')
 class OpenAICompatibleClient:
     def __init__(self, provider_cfg):
         self.name = provider_cfg.get('name', provider_cfg.get('id', ''))
-        self.api_base = provider_cfg['api_base'].rstrip('/')
+        self.api_base = provider_cfg['api_base'].strip().rstrip('/')
         self.api_key = os.getenv(provider_cfg.get('api_key_ref', ''), '')
         self.model = provider_cfg['model']
         self.timeout = 120
