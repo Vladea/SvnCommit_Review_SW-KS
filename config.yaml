@@ -66,6 +66,14 @@ llm:
     model: gpt-4o
     enabled: false
     description: 最强大的通用模型，审查质量最高
+  - id: AAAA
+    name: DeepseekT
+    type: openai_compatible
+    api_base: https://api.deepseek.com‌
+    api_key_ref: sk-d4ea50e0770f4c0081832be0d27957c2
+    model: Deepseek
+    enabled: true
+    description: ''
 notifications:
   teams:
     enabled: true
@@ -78,4 +86,10 @@ notifications:
     smtp_password_ref: EMAIL_SMTP_PASSWORD
     from_addr: ''
     to_addrs: []
-projects: []
+projects:
+- name: Molon_Code
+  svn_url: file:///D:/CP2017/SVN_Molan_Repo
+  enabled: true
+  owner_group: Molon
+  scan_window_days: 1
+  teams_webhook_url: ''

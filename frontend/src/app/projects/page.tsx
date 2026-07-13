@@ -10,23 +10,34 @@ import { Project } from '@/lib/types';
 export default function ProjectsPage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [form, setForm] = useState({ name: '', svn_url: '', owner_group: '', teams_webhook_url: '' });
+  const [error, setError] = useState('');
 
-  const load = () => api.get<Project[]>('/api/projects').then(setProjects);
+  const load = () => api.get<Project[]>('/api/projects').then(setProjects).catch(e => setError(e.message));
 
   useEffect(() => { load(); }, []);
 
   const save = async () => {
-    await api.post('/api/projects', { ...form, enabled: true, scan_window_days: 1 });
-    setForm({ name: '', svn_url: '', owner_group: '', teams_webhook_url: '' });
-    load();
+    setError('');
+    if (!form.name.trim()) { setError('请输入项目名'); return; }
+    if (!form.svn_url.trim()) { setError('请输入 SVN 仓库地址'); return; }
+    try {
+      await api.post('/api/projects', { ...form, enabled: true, scan_window_days: 1 });
+      setForm({ name: '', svn_url: '', owner_group: '', teams_webhook_url: '' });
+      load();
+    } catch (e: any) {
+      setError(e.message);
+    }
   };
 
   const toggle = (name: string, en: boolean) => {
-    api.post(`/api/projects/${encodeURIComponent(name)}/${en ? 'enable' : 'disable'}`).then(load);
+    api.post(`/api/projects/${encodeURIComponent(name)}/${en ? 'enable' : 'disable'}`)
+      .then(load).catch(e => setError(e.message));
   };
 
   const del = (name: string) => {
-    if (confirm(`确认删除 ${name} ?`)) api.del(`/api/projects/${encodeURIComponent(name)}`).then(load);
+    if (confirm(`确认删除 ${name} ?`))
+      api.del(`/api/projects/${encodeURIComponent(name)}`)
+        .then(load).catch(e => setError(e.message));
   };
 
   return (
@@ -40,7 +51,10 @@ export default function ProjectsPage() {
           <Input placeholder="负责人/团队" value={form.owner_group} onChange={e => setForm({ ...form, owner_group: e.target.value })} />
           <Input placeholder="Teams Webhook（可选）" value={form.teams_webhook_url} onChange={e => setForm({ ...form, teams_webhook_url: e.target.value })} />
         </div>
-        <Button onClick={save}>添加项目</Button>
+        <div className="flex items-center gap-3">
+          <Button onClick={save}>添加项目</Button>
+          {error && <span className="text-danger text-sm">{error}</span>}
+        </div>
       </Card>
       <table>
         <thead><tr><th>启用</th><th>项目</th><th>SVN URL</th><th>团队</th><th>操作</th></tr></thead>
