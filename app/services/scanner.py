@@ -8,7 +8,7 @@ from app.database import session
 from app.config import enabled_projects, scan_cfg, LOCAL_TZ
 from app.models import SvnCommit, ReviewIssue
 from app.models.changed_file import ChangedFile
-from app.services.svn_client import svn_logs, filter_logs_by_real_commit_date, svn_diff_safe, split_diff, should_review, parse_svn_time_to_local
+from app.services.svn_client import svn_logs, filter_logs_by_real_commit_date, svn_diff_safe, svn_diff_summarize, split_diff, should_review, parse_svn_time_to_local
 from app.services.review.rule_engine import rule_review
 from app.services.review.llm import llm_review
 from app.services.report_builder import create_report
@@ -72,16 +72,22 @@ def _process_commit(s, svn_url, log, progress_callback=None, completed=0, total=
         return None, True
 
     try:
+        file_list = svn_diff_summarize(svn_url, rev)
+    except Exception as e:
+        logger.error(f'Project [{name}] rev [{rev}] summarize error: {e}')
+        return {'project': name, 'revision': rev, 'author': log.get('author', 'unknown'), 'error': str(e)}, False
+
+    if len(file_list) > max_files:
+        logger.info(f'Project [{name}] rev [{rev}] skipped: {len(file_list)} files (>{max_files})')
+        return None, True
+
+    try:
         raw = svn_diff_safe(svn_url, rev)
     except Exception as e:
         logger.error(f'Project [{name}] rev [{rev}] diff error: {e}')
         return {'project': name, 'revision': rev, 'author': log.get('author', 'unknown'), 'error': str(e)}, False
 
     diff_map = split_diff(raw)
-
-    if len(diff_map) > max_files:
-        logger.info(f'Project [{name}] rev [{rev}] skipped: {len(diff_map)} files (>{max_files})')
-        return None, True
 
     c = SvnCommit(
         project_name=name, revision=rev,

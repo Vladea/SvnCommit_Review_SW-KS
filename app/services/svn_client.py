@@ -96,6 +96,11 @@ def filter_logs_by_real_commit_date(logs, start_date, end_date):
     return out, skipped
 
 
+def svn_diff_summarize(url, rev):
+    out = run_cmd_with_retry(['svn', 'diff', url, '-c', rev, '--summarize'] + auth_args(url))
+    return [m.strip() for m in re.findall(r'^[AMD]\s+(.+)$', out, re.M)]
+
+
 def svn_diff_safe(url, rev):
     last = ''
     urls = [url] if url.startswith('file://') else [url, f'{url}@{rev}', f'{url}@HEAD']
