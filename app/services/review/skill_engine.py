@@ -1,7 +1,7 @@
 import logging
 
 from app.config import skills_cfg, get_active_llm_provider
-from app.services.review.llm import OpenAICompatibleClient
+from app.services.review.llm import _get_client
 
 logger = logging.getLogger('svn_ai_review')
 
@@ -12,7 +12,7 @@ def review(project, rev, author, file_path, diff_text, commit_message):
         logger.warning(f'Skill review skipped: no active LLM provider')
         return []
 
-    client = OpenAICompatibleClient(provider)
+    client = _get_client(provider)
     skills = [s for s in skills_cfg() if s.get('enabled')]
     if not skills:
         logger.info(f'Skill review skipped: no enabled skills')

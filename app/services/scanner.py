@@ -1,11 +1,12 @@
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 
 from sqlalchemy.exc import IntegrityError
 
 from app.database import session
-from app.config import enabled_projects, scan_cfg, LOCAL_TZ
+from app.config import enabled_projects, scan_cfg, LOCAL_TZ, llm_cfg
 from app.models import SvnCommit, ReviewIssue
 from app.models.changed_file import ChangedFile
 from app.services.svn_client import svn_logs, filter_logs_by_real_commit_date, svn_diff_safe, svn_diff_summarize, split_diff, should_review, parse_svn_time_to_local
@@ -69,6 +70,7 @@ def _process_commit(s, svn_url, log, progress_callback=None, completed=0, total=
     rev = log['revision']
     max_files = int(scan_cfg().get('max_files_per_commit', 10))
     max_chars = int(scan_cfg().get('max_diff_chars_per_file', 12000))
+    max_diff_bytes = int(scan_cfg().get('max_diff_bytes', 0))
 
     if s.query(SvnCommit).filter_by(project_name=name, revision=rev).first():
         return None, True
@@ -91,103 +93,141 @@ def _process_commit(s, svn_url, log, progress_callback=None, completed=0, total=
 
     diff_map = split_diff(raw)
 
-    c = SvnCommit(
-        project_name=name, revision=rev,
-        author=log.get('author', ''),
-        commit_time=parse_svn_time_to_local(log.get('commit_time')) or datetime.utcnow(),
-        message=log.get('message', ''),
-        changed_file_count=len(diff_map)
-    )
     try:
-        s.add(c)
-        s.flush()
+        c = SvnCommit(
+            project_name=name, revision=rev,
+            author=log.get('author', ''),
+            commit_time=parse_svn_time_to_local(log.get('commit_time')) or datetime.utcnow(),
+            message=log.get('message', ''),
+            changed_file_count=len(diff_map)
+        )
+        try:
+            s.add(c)
+            s.flush()
+        except IntegrityError:
+            s.rollback()
+            logger.info(f'Project [{name}] rev [{rev}] already scanned, skipped')
+            return None, True
+
+        for fp, diff in diff_map.items():
+            need = 1 if should_review(fp) else 0
+            short = diff[:max_chars] if need else diff[:200]
+
+            s.add(ChangedFile(
+                commit_id=c.id, file_path=fp, diff_text=short,
+                diff_size=len(diff), need_review=need
+            ))
+
+            if progress_callback:
+                progress_callback({'phase': 'scanning', 'project': name, 'revision': rev,
+                                   'file': fp, 'completed': completed, 'total': total})
+
+            if need:
+                for issue in _review_file(name, rev, log.get('author', ''), fp, short, log.get('message', '')):
+                    s.add(issue)
+        s.commit()
+        return c, True
     except IntegrityError:
         s.rollback()
         logger.info(f'Project [{name}] rev [{rev}] already scanned, skipped')
         return None, True
+    except Exception as e:
+        s.rollback()
+        logger.error(f'Project [{name}] rev [{rev}] processing error: {e}')
+        return {'project': name, 'revision': rev, 'author': log.get('author', 'unknown'), 'error': str(e)}, False
 
-    for fp, diff in diff_map.items():
-        short = diff[:max_chars]
-        need = 1 if should_review(fp) else 0
 
-        s.add(ChangedFile(
-            commit_id=c.id, file_path=fp, diff_text=short,
-            diff_size=len(short), need_review=need
-        ))
-
-        if progress_callback:
-            progress_callback({'phase': 'scanning', 'project': name, 'revision': rev,
-                               'file': fp, 'completed': completed, 'total': total})
-
-        if need:
-            for issue in _review_file(name, rev, log.get('author', ''), fp, short, log.get('message', '')):
-                s.add(issue)
-    s.commit()
-    return c, True
+def _thread_process_commit(svn_url, log, progress_callback, completed_counter, total):
+    s = session()
+    try:
+        result, ok = _process_commit(s, svn_url, log, progress_callback, completed_counter, total)
+        s.commit()
+        return result, ok
+    except Exception as e:
+        s.rollback()
+        return {'project': log['project'], 'revision': log['revision'], 'author': log.get('author', 'unknown'), 'error': str(e)}, False
+    finally:
+        s.close()
 
 
 def run_range(start_date, end_date, project_names=None, push=True, progress_callback=None, max_commits=None):
-    s = session()
+    import threading
     matched, skipped, errors = collect_commits(start_date, end_date, project_names)
     new = []
-    scanned = 0
+    counter = [0]
+    lock = threading.Lock()
+
+    total = len(matched)
+    if max_commits and max_commits < total:
+        total = max_commits
 
     try:
-        total = len(matched)
-        for i, log in enumerate(matched):
-            if max_commits and scanned >= max_commits:
-                break
+        concurrent = llm_cfg().get('concurrent', 3)
+        with ThreadPoolExecutor(max_workers=concurrent) as executor:
+            futures = {}
+            for i, log in enumerate(matched):
+                if max_commits and i >= max_commits:
+                    break
+                def _cb(data, log=log):
+                    if progress_callback:
+                        with lock:
+                            counter[0] += 1
+                        data['completed'] = counter[0]
+                        data['total'] = total
+                        progress_callback(data)
+                fut = executor.submit(_thread_process_commit, log['svn_url'], log, progress_callback, 0, total)
+                futures[fut] = log
 
-            rev = log['revision']
-            name = log['project']
+            for future in as_completed(futures):
+                result, ok = future.result()
+                if result is not None and not ok:
+                    errors.append(result)
+                elif result is not None:
+                    new.append(result)
+                with lock:
+                    if not progress_callback:
+                        counter[0] += 1
 
-            if progress_callback:
-                progress_callback({'phase': 'diffing', 'project': name, 'revision': rev,
-                                   'file': '', 'completed': scanned, 'total': total})
+        rs = session()
+        try:
+            touched_keys = [(m['project'], m['revision']) for m in matched[:total]]
+            matched_logs = [{'project': m['project'], 'revision': m['revision'], 'author': m['author'],
+                             'commit_date_local': m['commit_date_local'], 'commit_time_local': m['commit_time_local']}
+                            for m in matched[:total]]
+            report = create_report(rs, start_date, end_date, touched_keys, matched_logs, skipped)
 
-            result, ok = _process_commit(s, log['svn_url'], log, progress_callback, scanned, total)
-            if result is not None and not ok:
-                errors.append(result)
-            elif result is not None:
-                new.append(result)
-            scanned += 1
+            if errors:
+                lines = ['', '\u2501' * 30, '\u26a0\ufe0f SVN / Review \u91c7\u96c6\u5f02\u5e38', '\u2501' * 30]
+                for err in errors:
+                    lines.append(
+                        f'- \u9879\u76ee\uff1a{err.get("project", "unknown")} '
+                        f'Revision\uff1a{err.get("revision", "unknown")} '
+                        f'\u63d0\u4ea4\u4eba\uff1a{err.get("author", "unknown")} '
+                        f'\u9519\u8bef\uff1a{err.get("error", "")}'
+                    )
+                report.report_markdown += '\n' + '\n'.join(lines)
+                rs.commit()
 
-        touched_keys = [(m['project'], m['revision']) for m in matched]
-        matched_logs = [{'project': m['project'], 'revision': m['revision'], 'author': m['author'],
-                         'commit_date_local': m['commit_date_local'], 'commit_time_local': m['commit_time_local']}
-                        for m in matched]
-        report = create_report(s, start_date, end_date, touched_keys, matched_logs, skipped)
+            if push:
+                results = send_notification(report.report_markdown)
+                report.teams_push_status = json.dumps(results, ensure_ascii=False)
+                rs.commit()
 
-        if errors:
-            lines = ['', '\u2501' * 30, '\u26a0\ufe0f SVN / Review \u91c7\u96c6\u5f02\u5e38', '\u2501' * 30]
-            for err in errors:
-                lines.append(
-                    f'- \u9879\u76ee\uff1a{err.get("project", "unknown")} '
-                    f'Revision\uff1a{err.get("revision", "unknown")} '
-                    f'\u63d0\u4ea4\u4eba\uff1a{err.get("author", "unknown")} '
-                    f'\u9519\u8bef\uff1a{err.get("error", "")}'
-                )
-            report.report_markdown += '\n' + '\n'.join(lines)
-            s.commit()
-
-        if push:
-            results = send_notification(report.report_markdown)
-            report.teams_push_status = json.dumps(results, ensure_ascii=False)
-            s.commit()
-
-        logger.info(f'Scan complete: {len(new)} new commits, {len(matched)} revisions, {len(skipped)} skipped, {len(errors)} errors')
-        return {
-            'new_commit_count': len(new),
-            'matched_revision_count': len(matched),
-            'skipped_by_date_count': len(skipped),
-            'report_id': report.id,
-            'errors': errors,
-            'matched_logs': matched_logs,
-            'skipped_logs': skipped[:50],
-            'report': report.report_markdown,
-        }
+            logger.info(f'Scan complete: {len(new)} new commits, {total} revisions, {len(skipped)} skipped, {len(errors)} errors')
+            return {
+                'new_commit_count': len(new),
+                'matched_revision_count': total,
+                'skipped_by_date_count': len(skipped),
+                'report_id': report.id,
+                'errors': errors,
+                'matched_logs': matched_logs,
+                'skipped_logs': skipped[:50],
+                'report': report.report_markdown,
+            }
+        finally:
+            rs.close()
     finally:
-        s.close()
+        pass
 
 
 def last_day_range_by_date():

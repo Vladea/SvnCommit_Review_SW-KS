@@ -157,10 +157,11 @@ export default function ScanPage() {
             <Button onClick={() => {
               if (!s.result) return;
               const rid = s.result.report_id;
+              const w = window.open('', '_blank', 'width=860,height=600');
+              if (!w) return;
+              w.document.title = `审查报告 #${rid}`;
+              w.document.body.textContent = '加载中...';
               api.get<{ id: number; report: string }>(`/api/reports/${rid}`).then(({ report }) => {
-                const w = window.open('', '_blank', 'width=860,height=600');
-                if (!w) return;
-                w.document.title = `审查报告 #${rid}`;
                 w.document.body.style.margin = '0';
                 w.document.body.style.padding = '20px';
                 w.document.body.style.backgroundColor = '#fff';

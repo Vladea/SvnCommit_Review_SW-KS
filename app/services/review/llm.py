@@ -8,6 +8,8 @@ import requests
 
 logger = logging.getLogger('svn_ai_review')
 
+_clients = {}
+
 
 class OpenAICompatibleClient:
     def __init__(self, provider_cfg):
@@ -16,32 +18,62 @@ class OpenAICompatibleClient:
         self.api_key = os.getenv(provider_cfg.get('api_key_ref', ''), '')
         self.model = provider_cfg['model']
         self.timeout = 120
+        self._session = None
+
+    @property
+    def session(self):
+        if self._session is None:
+            self._session = requests.Session()
+        return self._session
 
     def _chat(self, prompt):
-        r = requests.post(
-            self.api_base + '/chat/completions',
-            headers={
-                'Authorization': f'Bearer {self.api_key}',
-                'Content-Type': 'application/json'
-            },
-            json={
-                'model': self.model,
-                'messages': [{'role': 'user', 'content': prompt}],
-                'temperature': 0.1
-            },
-            timeout=self.timeout
-        )
-        r.raise_for_status()
-        data = r.json()
-        try:
-            return data['choices'][0]['message']['content']
-        except (KeyError, IndexError, TypeError):
-            raise RuntimeError(f'Unexpected API response: {str(data)[:200]}')
+        from app.config import llm_cfg
+        cfg = llm_cfg()
+        retry_count = cfg.get('retry_count', 2)
+        retry_delay = cfg.get('retry_delay', 5)
+
+        last_err = None
+        for attempt in range(retry_count + 1):
+            try:
+                r = self.session.post(
+                    self.api_base + '/chat/completions',
+                    headers={
+                        'Authorization': f'Bearer {self.api_key}',
+                        'Content-Type': 'application/json'
+                    },
+                    json={
+                        'model': self.model,
+                        'messages': [{'role': 'user', 'content': prompt}],
+                        'temperature': 0.1
+                    },
+                    timeout=self.timeout
+                )
+                r.raise_for_status()
+                data = r.json()
+                try:
+                    return data['choices'][0]['message']['content']
+                except (KeyError, IndexError, TypeError):
+                    raise RuntimeError(f'Unexpected API response: {str(data)[:200]}')
+            except Exception as e:
+                last_err = e
+                if attempt < retry_count:
+                    wait = retry_delay * (2 ** attempt)
+                    logger.warning(f'[{self.name}] LLM attempt {attempt + 1}/{retry_count + 1} failed: {e}. Retrying in {wait}s...')
+                    time.sleep(wait)
+        raise last_err
 
     @staticmethod
     def _extract_json(text):
         if not text:
             return {}
+
+        m = re.search(r'```(?:json)?\s*(\{[\s\S]*?\})\s*```', text)
+        if m:
+            try:
+                return json.loads(m.group(1))
+            except json.JSONDecodeError:
+                pass
+
         start = text.find('{')
         if start == -1:
             return {}
@@ -128,6 +160,13 @@ class OpenAICompatibleClient:
             return {'ok': False, 'elapsed_ms': elapsed, 'detail': str(e)}
 
 
+def _get_client(provider_cfg):
+    pid = provider_cfg.get('id', '')
+    if pid not in _clients:
+        _clients[pid] = OpenAICompatibleClient(provider_cfg)
+    return _clients[pid]
+
+
 def llm_review(project, rev, author, file_path, diff_text, commit_message):
     from app.config import get_active_llm_provider
 
@@ -135,5 +174,5 @@ def llm_review(project, rev, author, file_path, diff_text, commit_message):
     if not provider:
         return []
 
-    client = OpenAICompatibleClient(provider)
+    client = _get_client(provider)
     return client.review(project, rev, author, file_path, diff_text, commit_message)

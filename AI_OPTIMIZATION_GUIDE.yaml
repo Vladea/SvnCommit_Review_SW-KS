@@ -1,0 +1,1094 @@
+# ============================================================================
+# SVN AI Review V2.0 — 代码审查优化指导清单
+# 生成时间: 2026-07-22
+# 用途: 供 AI 工具读取的结构化优化任务列表
+# 格式: 每个 issue 包含完整定位信息、问题描述、修复建议和预期效果
+# ============================================================================
+
+meta:
+  project: SVN AI Review V2.0
+  reviewed_version: "2.0"
+  generated_at: "2026-07-22"
+  total_issues: 50
+  technology:
+    backend: Python 3.12 / FastAPI / SQLAlchemy / SQLite / APScheduler
+    frontend: Next.js 14 (App Router) / TypeScript / Tailwind CSS
+    deployment: Windows .bat scripts / single-process Python + static frontend
+
+# 严重度说明:
+#   critical: 会导致数据丢失/安全漏洞/生产崩溃
+#   high:     显著影响性能/可靠性/安全性，建议优先处理
+#   medium:   影响代码质量/可维护性/用户体验
+#   low:      改进建议，非紧急
+
+# 工作量说明:
+#   small:  < 1 小时，单文件改动
+#   medium: 1-4 小时，多文件协同改动
+#   large:  > 4 小时，涉及架构重构
+
+# ============================================================================
+# 一、性能优化
+# ============================================================================
+
+performance:
+  - id: PERF-001
+    severity: high
+    title: 提交串行处理 — concurrent 配置完全未使用
+    file: app/services/scanner.py
+    lines: "128-145"
+    effort: medium
+    description: >
+      run_range() 中的 for 循环逐个串行处理 commit，每个 commit 内部逐文件依次
+      调用 LLM API。config.yaml 中定义了 concurrent:3，但代码中从未读取该配置。
+      以 30 个 commit、每个 5 个文件为例，串行耗时约 8.5 分钟。
+    current_code: >
+      # scanner.py:129-145
+      for i, log in enumerate(matched):
+          result, ok = _process_commit(s, log['svn_url'], log, progress_callback, scanned, total)
+    suggested_fix: >
+      使用 concurrent.futures.ThreadPoolExecutor 并行处理 commit，
+      workers 数量从 llm_cfg().get('concurrent', 3) 读取。
+      每个线程使用独立的 DB session（SQLAlchemy session 非线程安全）。
+      需先开启 SQLite WAL 模式（参见 PERF-007）。
+    expected_impact: "扫描速度提升 2-3 倍（与 concurrent 值线性相关）"
+    prerequisites:
+      - PERF-007
+
+  - id: PERF-002
+    severity: high
+    title: LLM 客户端逐文件重复创建 — 无连接复用
+    file: app/services/review/llm.py
+    lines: "127-135"
+    effort: small
+    description: >
+      llm_review() 每次调用都 new OpenAICompatibleClient(provider)，
+      为每个文件新建 HTTP 连接。扫描 30 commit × 5 文件 = 150 次重复创建。
+      requests 库的 Session 对象可以复用 TCP 连接。
+    current_code: >
+      # llm.py:127-135
+      def llm_review(project, rev, author, file_path, diff_text, commit_message):
+          provider = get_active_llm_provider()
+          client = OpenAICompatibleClient(provider)  # 每次 new
+          return client.review(...)
+    suggested_fix: >
+      模块级字典缓存客户端实例，key 为 provider['id']。
+      改用 requests.Session() 复用 TCP 连接池。
+    expected_impact: "减少 TCP 握手开销，单次扫描节省 30-50s"
+
+  - id: PERF-003
+    severity: high
+    title: LLM 审查无并发 — concurrent:3 闲置
+    file: app/services/review/llm.py
+    lines: "全文"
+    effort: medium
+    description: >
+      config.py:52 定义了 llm.concurrent: 3，但 llm.py 中完全未引用，
+      也没有使用线程池并发发出 LLM 请求。所有文件审查串行进行。
+      配合 PERF-001 可实现 commit 并行 + 文件并行两级并发。
+    current_code: >
+      # config.py:52 — 定义了但无人消费
+      'llm': { 'concurrent': 3, ... }
+    suggested_fix: >
+      在 llm.py 中读取 concurrent 配置，使用 ThreadPoolExecutor
+      在文件级别并发调用 LLM API。注意控制总并发数不超过 provider 的 rate limit。
+    expected_impact: "LLM 审查部分加速 2-3 倍"
+    prerequisites:
+      - PERF-001
+
+  - id: PERF-004
+    severity: high
+    title: LLM API 无重试机制 — retry_count 配置闲置
+    file: app/services/review/llm.py
+    lines: "20-39"
+    effort: small
+    description: >
+      _chat() 方法只发一次 POST 请求。LLM API 返回 429/502/503 时直接失败，
+      该文件审查结果丢失。config.py:53 定义了 retry_count:2，
+      但 llm.py 中完全未引用。
+    current_code: >
+      # llm.py:20-33 — 无重试
+      def _chat(self, prompt):
+          r = requests.post(...)
+          r.raise_for_status()
+    suggested_fix: >
+      在 _chat() 中添加指数退避重试逻辑，读取 config 中的 retry_count 和
+      retry_delay。对 429 响应优先使用 Retry-After 头。
+    expected_impact: "因 LLM 服务波动导致的文件审查丢失率降低 90%"
+
+  - id: PERF-005
+    severity: medium
+    title: collect_commits 重复调用 — SVN 日志拉取翻倍
+    status: done
+    file: app/routes/scan.py + app/services/scanner.py
+    lines: "scan.py:31 / scanner.py:123"
+    effort: small
+    description: >
+      GET /scan/start 在预览阶段调用 collect_commits() 获取 matched_logs，
+      随后启动的 run_range() 再次调用 collect_commits()。
+      两次 SVN log 命令完全重复，浪费网络和时间。
+    suggested_fix: >
+      run_range() 增加可选参数 accept pre_collected matches，
+      或将 collect_commits 结果缓存在 scan_progress 中供后续使用。
+    expected_impact: "每次扫描节省一次 SVN log 拉取（视仓库大小 2-10s）"
+
+  - id: PERF-006
+    severity: high
+    title: 数据库模型缺少关键索引
+    file: app/models/commit.py, app/models/changed_file.py, app/models/review_issue.py, app/models/daily_report.py, app/models/author_stat.py
+    lines: "全文"
+    effort: small
+    description: >
+      所有 ORM 模型均未定义 Index()。以下高频查询列缺少索引：
+      - SvnCommit.project_name + revision（去重查询，scanner.py:71）
+      - SvnCommit.author（作者统计）
+      - ChangedFile.commit_id（JOIN 查询）
+      - ReviewIssue.project_name + revision（报告生成，report_builder.py:23-27）
+      - ReviewIssue.level（按级别筛选）
+      - DailyReport.report_date（报告列表排序）
+      - AuthorStat.report_id + author（统计查询）
+    suggested_fix: >
+      在模型定义中添加 Index() 约束。例如：
+      Index('ix_svn_commits_project_rev', 'project_name', 'revision')
+      Index('ix_review_issues_project_rev', 'project_name', 'revision')
+    expected_impact: "大扫描历史时查询速度提升 10-100 倍"
+
+  - id: PERF-007
+    severity: high
+    title: SQLite 未开启 WAL 模式 — 并发写入易锁定
+    file: app/database.py
+    lines: "7-10"
+    effort: small
+    description: >
+      默认 SQLite 使用 DELETE 日志模式，写入时阻塞读取，并发写入直接报
+      "database is locked"。WAL 模式允许并发读写，且崩溃恢复更可靠。
+      这是实现 PERF-001（并发扫描）的前置条件。
+    current_code: >
+      # database.py:7-10
+      engine = create_engine(DATABASE_URL, connect_args={'check_same_thread': False})
+    suggested_fix: >
+      在 engine 创建后通过事件监听器执行 PRAGMA journal_mode=WAL：
+      @event.listens_for(engine, "connect")
+      def set_sqlite_pragma(dbapi_connection, connection_record):
+          cursor = dbapi_connection.cursor()
+          cursor.execute("PRAGMA journal_mode=WAL")
+          cursor.execute("PRAGMA foreign_keys=ON")
+          cursor.close()
+    expected_impact: "并发写入不再报错，崩溃恢复能力提升"
+    prerequisites: []
+
+  - id: PERF-008
+    severity: medium
+    title: 前端扫描进度轮询间隔固定 1 秒
+    file: frontend/src/lib/scanStore.ts
+    lines: "74"
+    effort: small
+    description: >
+      setInterval(poll, 1000) 每 1 秒轮询一次 /api/scan/progress。
+      扫描 10 分钟 = 600 次 HTTP 请求。虽然后端只做 dict 查询很轻量，
+      但网络开销和前端渲染仍然浪费。
+    current_code: >
+      // scanStore.ts:74
+      timerId = window.setInterval(() => pollProgress(), 1000)
+    suggested_fix: >
+      使用指数退避：初始 1s，每 10 轮增加 1s，上限 5s。
+      或改用 Server-Sent Events (SSE) 推送进度。
+    expected_impact: "10 分钟扫描减少约 200 次 HTTP 请求"
+
+  - id: PERF-009
+    severity: medium
+    title: 扫描全程共用一个 DB session — 身份映射膨胀
+    file: app/services/scanner.py
+    lines: "122"
+    effort: small
+    description: >
+      s = session() 在 run_range() 入口创建，用于处理所有 commit。
+      随着 commit 增加，SQLAlchemy 的 identity_map 不断膨胀，
+      内存持续增长，且万一 session 进入错误状态会影响后续所有 commit。
+    current_code: >
+      # scanner.py:122
+      s = session()
+      # ... 处理所有 commit 都用这个 s
+    suggested_fix: >
+      每 10-20 个 commit 创建新 session，或每个 commit 独立 session。
+      配合 PERF-001 时每个线程自动获得独立 session。
+    expected_impact: "长扫描（>100 commit）内存占用降低 30-50%"
+
+  - id: PERF-010
+    severity: medium
+    title: svn diff 全量读入内存 — 大文件 OOM 风险
+    file: app/services/svn_client.py
+    lines: "99-107"
+    effort: medium
+    description: >
+      svn_diff_safe() 使用 subprocess.run(stdout=PIPE) 将整个 diff
+      输出读入内存字符串。如果 commit 包含 50MB 二进制文件的 diff，
+      会导致内存溢出。
+    current_code: >
+      # svn_client.py:99-107
+      def svn_diff_safe(url, rev):
+          return run_cmd_with_retry(['svn', 'diff', u, '-c', rev] + auth_args(url))
+    suggested_fix: >
+      添加 max_diff_bytes 配置（默认 5MB），在 capture_output 后检查 len(raw)，
+      超出则截断并记录警告。或使用 subprocess.Popen 增量读取。
+    expected_impact: "防止大文件导致 OOM 崩溃"
+
+  - id: PERF-011
+    severity: low
+    title: 配置每次访问都 stat 检查 mtime
+    status: done
+    file: app/config.py
+    lines: "100-126"
+    effort: small
+    description: >
+      load_cfg() 每次调用都 os.stat() 检查文件 mtime。
+      扫描过程中 scan_cfg() 被每个 commit 调用一次，
+      10 个文件/commit × 50 commit = 500 次 stat 调用。
+    suggested_fix: >
+      添加短期 TTL 缓存（如 5 秒内不重复 stat），
+      或扫描开始时将配置作为参数传入而非每步查询。
+    expected_impact: "微小优化，减少文件系统调用"
+
+# ============================================================================
+# 二、安全加固
+# ============================================================================
+
+security:
+  - id: SEC-001
+    severity: high
+    title: 静态文件服务存在路径遍历风险
+    file: app/main.py
+    lines: "39-54"
+    effort: small
+    description: >
+      catch-all 路由 {page:path} 拼接 Path 后直接 FileResponse，
+      未做 resolve() 前缀校验。攻击者可请求 /../../../config.yaml
+      读取项目根目录的配置文件。
+    current_code: >
+      # main.py:40-51
+      @app.get('/{page:path}')
+      async def spa(page: str):
+          path = page.strip('/')
+          html_path = STATIC_DIR / (path or '.') / 'index.html'
+          if html_path.exists():
+              return FileResponse(html_path)
+    suggested_fix: >
+      html_path = (STATIC_DIR / (path or '.')).resolve()
+      if not str(html_path).startswith(str(STATIC_DIR.resolve())):
+          raise HTTPException(404)
+    expected_impact: "防止任意文件读取攻击"
+
+  - id: SEC-002
+    severity: high
+    title: 无任何认证/授权机制
+    file: app/main.py, 所有 routes
+    lines: "全文"
+    effort: large
+    description: >
+      所有 API 端点公开可访问，无 JWT/OAuth/API Key/Basic Auth。
+      内网任何人可以触发扫描、修改配置、删除项目、查看所有数据。
+    suggested_fix: >
+      方案 A（轻量）：环境变量 STATIC_API_KEY，路由层校验 X-API-Key 头。
+      方案 B（完整）：集成 FastAPI OAuth2 + JWT，添加用户/角色模型。
+      建议先用方案 A 快速止血，再规划方案 B。
+    expected_impact: "防止未授权访问和误操作"
+
+  - id: SEC-003
+    severity: medium
+    title: SVN URL 无格式校验 — 可注入 SVN 命令行标志
+    status: partial
+    file: app/schemas/project.py, app/services/svn_client.py
+    lines: "project.py:6 / svn_client.py:63"
+    effort: small
+    description: >
+      ProjectRequest.svn_url 只校验了 min_length=1，不校验 URL 格式。
+      恶意输入如 --username=attacker 会被 svn 命令行解释为标志而非 URL。
+      虽然 subprocess.run 使用列表参数（非 shell=True），
+      但 SVN 会将 --xxx 视为自己的选项。
+    current_code: >
+      # svn_client.py:63
+      ['svn', 'log', url, '-r', ...]  # url 未校验
+    suggested_fix: >
+      在 ProjectRequest 中增加 Pydantic validator：
+      @field_validator('svn_url')
+      def validate_url(cls, v):
+          if not v.startswith(('svn://', 'http://', 'https://', 'file://')):
+              raise ValueError('Invalid SVN URL scheme')
+          return v
+    expected_impact: "防止命令注入和意外行为"
+
+  - id: SEC-004
+    severity: medium
+    title: LLM api_base 无 URL 校验 — SSRF 风险
+    file: app/schemas/llm.py, app/services/review/llm.py
+    lines: "llm.py:135 / llm.py:15"
+    effort: small
+    description: >
+      LLMProviderRequest.api_base 接受任意字符串，无 URL 格式校验。
+      可指向内网地址进行 SSRF 攻击，或指向恶意 API 服务器窃取 diff 内容。
+    suggested_fix: >
+      在 LLMProviderRequest 中校验 scheme 为 http/https，
+      可选增加 allowlist 域名白名单。
+    expected_impact: "防止 SSRF 和数据泄露"
+
+  - id: SEC-005
+    severity: medium
+    title: 无 CORS 配置 — 前后端分离部署时跨域失效
+    file: app/main.py
+    lines: "全文"
+    effort: small
+    description: >
+      未添加 CORSMiddleware。当前生产环境前端由同一 FastAPI 进程
+      提供静态文件，属于同源请求所以无问题。但如果将来前后端分别部署，
+      浏览器会拦截所有跨域 API 请求。
+    suggested_fix: >
+      添加 CORSMiddleware，默认 allow_origins 为 localhost，
+      可通过环境变量 CORS_ORIGINS 配置。
+    expected_impact: "支持独立前端部署"
+
+  - id: SEC-006
+    severity: low
+    title: 环境变量引用名通过 API 暴露
+    file: app/routes/settings.py
+    lines: "36"
+    effort: small
+    description: >
+      GET /api/settings/llm/providers 返回 provider 配置中的
+      api_key_ref 字段（如 DEEPSEEK_API_KEY），暴露了内部 .env
+      变量的命名惯例。虽然未泄露值本身，但降低了攻击者猜测难度。
+    suggested_fix: >
+      在序列化时过滤 api_key_ref 等敏感引用字段，或返回掩码值。
+    expected_impact: "减少内部信息泄露面"
+
+  - id: SEC-007
+    severity: low
+    title: 扫描日期参数无格式校验
+    file: app/schemas/scan.py
+    lines: "5-6"
+    effort: small
+    description: >
+      ScanRangeRequest 的 start_date/end_date 为裸 str 类型，
+      无 Pydantic validator 校验 YYYY-MM-DD 格式。
+      传入非法格式会导致 svn log 命令失败，错误信息不友好。
+    suggested_fix: >
+      添加 @field_validator 使用 datetime.strptime 校验格式。
+    expected_impact: "更早发现参数错误，避免进入 SVN 执行才报错"
+
+# ============================================================================
+# 三、架构与可维护性
+# ============================================================================
+
+architecture:
+  - id: ARCH-001
+    severity: high
+    title: 无依赖注入 — 所有服务直接 import 全局变量
+    file: app/services/scanner.py, app/services/svn_client.py, app/services/review/llm.py, app/services/review/rule_engine.py, app/services/notifier.py, app/services/report_builder.py
+    lines: "各文件头部 import 区域"
+    effort: large
+    description: >
+      所有 Service 通过 from app.database import session 和 
+      from app.config import xxx 直接引用全局模块级单例。
+      导致：
+      1. 无法单元测试——必须准备真实 DB + 真实 SVN + 真实 LLM API
+      2. 无法替换实现——要换通知渠道必须改源码
+      3. 无法隔离影响——修改一个模块可能影响所有间接引用者
+    current_code: >
+      # 典型模式 (scanner.py:7-8)
+      from app.database import session
+      from app.config import enabled_projects, scan_cfg, LOCAL_TZ
+    suggested_fix: >
+      采用 Context Object 模式：
+      1. 新建 app/context.py，用 dataclass 集中管理所有依赖
+      2. 函数通过 get_context() 获取依赖，而非 import 全局
+      3. 测试时 set_context(AppContext(db_factory=mock_db, ...)) 替换
+      详见前文"无依赖注入修复方案"。
+    expected_impact: "项目获得完整单元测试能力，模块间解耦"
+    prerequisites: []
+
+  - id: ARCH-002
+    severity: high
+    title: 路由层直接操作数据库 — 无 Repository/Service 层
+    file: app/routes/reports.py, app/routes/issues.py, app/routes/dashboard.py, app/routes/authors.py
+    lines: "各 data-query 路由"
+    effort: medium
+    description: >
+      Route handler 中直接 import session() 并编写 SQLAlchemy 查询，
+      跨越了 3 层架构（Controller → ORM → DB），缺少 Service 层隔离。
+      导致：
+      1. 路由层耦合了数据库实现细节
+      2. 查询逻辑无法复用（不同路由可能重复相似查询）
+      3. 路由测试必须启动完整数据库
+    current_code: >
+      # routes/reports.py:11
+      def list_reports():
+          s = session()
+          rows = s.query(DailyReport).order_by(DailyReport.id.desc()).limit(50).all()
+    suggested_fix: >
+      抽取 query service 函数：
+      def get_latest_reports(db, limit=50):
+          return db.query(DailyReport).order_by(...).limit(limit).all()
+      路由改为：
+      def list_reports():
+          ctx = get_context()
+          s = ctx.db_factory()
+          try:
+              return format_reports(get_latest_reports(s))
+          finally:
+              s.close()
+    expected_impact: "路由与数据层解耦，查询可复用可测试"
+
+  - id: ARCH-003
+    severity: high
+    title: 无数据库迁移策略 — 模型变更会生产崩溃
+    file: app/database.py
+    lines: "22-23"
+    effort: medium
+    description: >
+      init_db() 仅调用 Base.metadata.create_all()，这是 CREATE IF NOT EXISTS。
+      如果模型新增/修改列，create_all 不会更新已有表结构，
+      运行时出现 OperationalError: no such column。
+    current_code: >
+      # database.py:22-23
+      def init_db():
+          Base.metadata.create_all(bind=engine)
+    suggested_fix: >
+      集成 Alembic 管理数据库迁移：
+      1. alembic init alembic
+      2. 配置 alembic.ini 指向 app/models
+      3. 启动时运行 alembic upgrade head
+      4. 每次模型变更生成迁移脚本: alembic revision --autogenerate
+    expected_impact: "版本升级时数据库自动迁移，消除生产事故风险"
+
+  - id: ARCH-004
+    severity: medium
+    title: 审查引擎硬编码 — 不可扩展
+    status: partial
+    file: app/services/scanner.py
+    lines: "57-58"
+    effort: medium
+    description: >
+      _review_file() 硬编码了 rule_review() + llm_review() 的调用顺序。
+      新增审查引擎需要：
+      1. 修改 scanner.py 的 import 和调用
+      2. 在 _review_file() 中硬编码拼接
+      无法通过配置启用/禁用引擎。
+    current_code: >
+      # scanner.py:57-58 — 硬编码
+      for issue in rule_review(...) + llm_review(...):
+          issues.append(ReviewIssue(**issue))
+    suggested_fix: >
+      使用注册表模式，引擎通过配置启用：
+      engines = []
+      if ctx.rule_review: engines.append(ctx.rule_review)
+      if ctx.llm_review: engines.append(ctx.llm_review)
+      if ctx.get('style_review'): engines.append(ctx.style_review)
+      for engine in engines:
+          for issue in engine(...):
+              issues.append(ReviewIssue(**issue))
+    expected_impact: "新增审查引擎只需实现函数 + 注册到上下文，不改核心流程"
+
+  - id: ARCH-005
+    severity: medium
+    title: 数据模型缺少外键约束
+    file: app/models/changed_file.py, app/models/author_stat.py, app/models/review_issue.py
+    lines: "模型字段定义"
+    effort: small
+    description: >
+      ChangedFile.commit_id, AuthorStat.report_id 是裸 Integer，
+      无 ForeignKey 约束。ReviewIssue 通过 project_name+revision 字符串
+      关联 SvnCommit 而非外键。这导致：
+      1. 删除 SvnCommit 不会级联删除 ChangedFile
+      2. 可能出现孤儿记录
+      3. SQLite 也不会校验参照完整性
+    suggested_fix: >
+      添加 ForeignKey 和 relationship：
+      commit_id = Column(Integer, ForeignKey('svn_commits.id'))
+      ReviewIssue 增加 commit_id 列替代 project_name/revision 字符串关联。
+    expected_impact: "数据完整性有保障，支持级联操作"
+
+  - id: ARCH-006
+    severity: medium
+    title: 配置缓存线程不安全
+    file: app/config.py
+    lines: "63-64, 100-106"
+    effort: small
+    description: >
+      _cache 和 _cache_mtime 是模块级全局变量，无锁保护。
+      多线程并发 load_cfg() + save_cfg() 可能导致：
+      1. 一个线程读到半更新的配置
+      2. save_cfg 写入的缓存被另一个线程的读覆盖
+    current_code: >
+      # config.py:63-64
+      _cache = None
+      _cache_mtime = 0.0
+    suggested_fix: >
+      添加 threading.Lock() 保护所有 _cache/_cache_mtime 读写。
+      或使用 threading.local() 做 per-thread 缓存。
+    expected_impact: "并发扫描和 API 请求时配置一致性有保证"
+
+  - id: ARCH-007
+    severity: low
+    title: datetime.utcnow 已废弃
+    file: app/models/commit.py, app/models/review_issue.py, app/models/daily_report.py
+    lines: "各模型 default=datetime.utcnow"
+    effort: small
+    description: >
+      Python 3.12+ 已废弃 datetime.utcnow()，改用 
+      datetime.now(datetime.timezone.utc)。虽然当前仍可运行，
+      但未来 Python 版本可能移除。
+    suggested_fix: >
+      改为 func.now() 或 default=lambda: datetime.now(timezone.utc)
+    expected_impact: "消除未来兼容性风险"
+
+  - id: ARCH-008
+    severity: low
+    title: 旧 schedule 格式迁移不持久化
+    status: done
+    file: app/config.py
+    lines: "77-83"
+    effort: small
+    description: >
+      _normalize() 将旧 schedule 格式（{'enabled': True, 'hour': 18}）
+      迁移为新格式（{'entries': [...]}）只在内存中完成，不写回 YAML。
+      缓存失效后迁移逻辑会重复执行。
+    suggested_fix: >
+      迁移后调用 save_cfg(cfg) 将新格式写回磁盘。
+    expected_impact: "消除重复迁移逻辑，配置格式统一"
+
+  - id: ARCH-009
+    severity: low
+    title: 数据库 engine 在 import 时实例化 — 配置时机风险
+    file: app/database.py
+    lines: "7"
+    effort: small
+    description: >
+      engine = create_engine(DATABASE_URL, ...) 在模块 import 时执行。
+      如果 DATABASE_URL 环境变量在 import 之后才设置（极少情况），
+      engine 将使用错误的 URL。
+    suggested_fix: >
+      改为惰性初始化：用 get_engine() 函数，首次调用时创建。
+    expected_impact: "消除初始化时序风险"
+
+# ============================================================================
+# 四、可靠性
+# ============================================================================
+
+reliability:
+  - id: REL-001
+    severity: high
+    title: 扫描线程为 daemon — 进程退出直接杀线程
+    file: app/routes/scan.py
+    lines: "60"
+    effort: medium
+    description: >
+      threading.Thread(target=_run, daemon=True).start() 创建的扫描线程
+      在 FastAPI 进程退出时会被强制终止，不做任何清理：
+      1. 正在写入的数据库记录丢失
+      2. 正在进行的 SVN 操作中断
+      3. LLM API 请求被遗弃
+    current_code: >
+      # scan.py:60
+      threading.Thread(target=_run, daemon=True).start()
+    suggested_fix: >
+      方案 A：使用非 daemon 线程 + atexit 注册 graceful shutdown 钩子。
+      方案 B：使用 APScheduler 的 job executor（项目已有 APScheduler 依赖）。
+      方案 C：使用 FastAPI 的 BackgroundTasks 或 lifespan 事件管理。
+    expected_impact: "防止进程重启/关闭导致的数据丢失"
+
+  - id: REL-002
+    severity: high
+    title: 扫描无取消机制
+    file: app/routes/scan.py + frontend/src/lib/scanStore.ts
+    lines: "scan.py:60 / scanStore.ts:49-74"
+    effort: medium
+    description: >
+      启动扫描后前端和用户无法取消。前端 stopPolling() 仅停止 UI 轮询，
+      后端线程继续运行。正在进行的扫描消耗 SVN 和 LLM 资源无法被中断。
+    suggested_fix: >
+      1. 新增 POST /scan/cancel/{scan_id} 端点，设置取消标志
+      2. 在 _process_commit 循环中检查取消标志
+      3. scan_progress 增加 cancelled 状态
+      4. 前端添加"取消扫描"按钮
+    expected_impact: "用户可随时终止误触发的扫描，节省资源"
+
+  - id: REL-003
+    severity: high
+    title: 同步端点阻塞 FastAPI 线程池
+    file: app/routes/scan.py
+    lines: "12-19"
+    effort: small
+    description: >
+      POST /scan/range 和 POST /jobs/run-daily 是 def（非 async def），
+      FastAPI 默认在线程池中运行这些同步函数。长时间扫描（分钟级）
+      会耗尽线程池 worker，导致其他 API 请求被阻塞。
+    suggested_fix: >
+      将这些端点标记为 async def，内部使用 
+      await asyncio.to_thread(run_range, ...) 
+      或直接使用 BackgroundTasks 异步执行。
+    expected_impact: "长时间扫描不阻塞其他 API 请求"
+
+  - id: REL-004
+    severity: medium
+    title: LLM JSON 解析逻辑脆弱 — brace 计数不可靠
+    status: partial
+    file: app/services/review/llm.py
+    lines: "41-63"
+    effort: small
+    description: >
+      _extract_json() 使用 brace 深度计数从 LLM 响应中提取 JSON。
+      如果 LLM 返回代码块中自然包含花括号（如 C 代码），
+      计数会失准导致解析失败或截断。
+      也不处理 markdown 代码块 ```json...``` 格式。
+    current_code: >
+      # llm.py:41-63 — 纯 brace 计数
+      def _extract_json(text):
+          start = text.find('{')
+          depth = 0
+          for i in range(start, len(text)):
+              if ch == '{': depth += 1
+              elif ch == '}': depth -= 1
+    suggested_fix: >
+      分层解析策略：
+      1. 先尝试 re.search(r'```json\s*(.*?)\s*```', text, re.DOTALL)
+      2. 再尝试 brace 匹配
+      3. 都失败时尝试直接 json.loads(text)
+      4. 使用 response_format={"type": "json_object"}（如果 API 支持）
+    expected_impact: "LLM 响应解析成功率提升 30-50%"
+
+  - id: REL-005
+    severity: medium
+    title: LLM Prompt 工程粗糙 — 输出质量不稳定
+    status: partial
+    file: app/services/review/llm.py
+    lines: "66-71"
+    effort: small
+    description: >
+      Prompt 是单句中文字符串，无 system prompt、无输出 JSON schema 描述、
+      无约束条件。LLM 完全靠猜测决定 issues 格式，导致：
+      1. 不同 LLM 返回格式不一致
+      2. 缺少关键字段（level/type/suggestion）
+      3. 可能出现无关输出
+    current_code: >
+      # llm.py:66-71
+      prompt = (
+          '请对以下 SVN diff 做 Review，只输出 JSON。'
+          f'文件：{file_path}\nDiff:\n{diff_text}'
+      )
+    suggested_fix: >
+      1. 添加 system message 描述审查规则和输出 schema
+      2. 在 prompt 中包含明确的 JSON schema 示例
+      3. 使用 response_format: { type: "json_object" }（OpenAI 兼容）
+      4. 添加 max_tokens 限制防止输出过长
+    expected_impact: "LLM 输出更加一致准确，减少后处理复杂度"
+
+  - id: REL-006
+    severity: medium
+    title: LLM 无 token 预算控制 — 可能超上下文窗口
+    file: app/services/review/llm.py
+    lines: "65-71"
+    effort: small
+    description: >
+      默认 max_diff_chars_per_file=12000，按中文约 1.5 chars/token 计算
+      约为 8000 tokens，加上 prompt 可能超过部分模型的上下文窗口。
+      无 token 计数或截断策略。
+    suggested_fix: >
+      1. 简易估算：token_count ≈ len(text) / 3（英文）或 1.5（中文）
+      2. 如果超过 max_input_tokens，截断 diff 并附加省略标记
+      3. 在 config.yaml 增加 max_input_tokens 配置项
+    expected_impact: "避免 LLM API 返回 context length exceeded 错误"
+
+  - id: REL-007
+    severity: low
+    title: 进度回调 completed 计数少 1
+    file: app/services/scanner.py
+    lines: "140-145"
+    effort: small
+    description: >
+      _process_commit 调用时传入参数 scanned（旧值），
+      调用后才 scanned += 1。前端看到的 completed 始终比实际少 1。
+    current_code: >
+      # scanner.py:140-145
+      result, ok = _process_commit(..., scanned, total)  # scanned 是旧值
+      scanned += 1
+    suggested_fix: >
+      在调用前先 scanned += 1 或传 i+1。
+    expected_impact: "进度条显示准确"
+
+  - id: REL-008
+    severity: medium
+    title: _process_commit 缺少整体事务回滚保护
+    file: app/services/scanner.py
+    lines: "65-117"
+    effort: small
+    description: >
+      _process_commit 中 s.add(c), s.flush() 后如果在 _review_file 阶段
+      抛出异常，session 进入脏状态且未 rollback。虽然最外层
+      run_range 有 try/finally s.close()，但无 rollback 会留下未提交事务。
+    suggested_fix: >
+      将 _process_commit 主体包裹在 try/except 中，
+      except 分支调用 s.rollback() 后重新抛出或记录错误。
+    expected_impact: "单文件审查异常不影响后续 commit 处理"
+
+  - id: REL-009
+    severity: low
+    title: 不需要审查的文件仍全量存储 diff
+    file: app/services/scanner.py
+    lines: "101-117"
+    effort: small
+    description: >
+      对于 should_review() 返回 False 的文件（如二进制、exclude 路径），
+      仍然存储完整的 diff_text（上限 max_chars=12000），浪费 DB 空间。
+    suggested_fix: >
+      对 need_review=0 的文件截断 diff_text 到前 200 字符或不存储。
+    expected_impact: "数据库体积减少 20-40%"
+
+  - id: REL-010
+    severity: low
+    title: 数据库 engine 未在关闭时 dispose
+    file: app/database.py
+    lines: "7-10"
+    effort: small
+    description: >
+      无 FastAPI shutdown 事件调用 engine.dispose()。
+      虽然 SQLite 影响小，但重复重启可能积累文件句柄。
+    suggested_fix: >
+      app.add_event_handler("shutdown", lambda: engine.dispose())
+    expected_impact: "消除潜在的资源泄漏"
+
+# ============================================================================
+# 五、前端
+# ============================================================================
+
+frontend:
+  - id: FE-001
+    severity: medium
+    title: window.open 在异步回调中被浏览器拦截
+    file: frontend/src/app/scan/page.tsx
+    lines: "161"
+    effort: small
+    description: >
+      "查看完整报告"按钮在 api.get().then() 回调中调用 window.open()。
+      浏览器安全策略要求弹窗必须在同步的点击事件中触发。
+      当前实现下弹窗大概率被拦截。
+    current_code: >
+      // scan/page.tsx:161
+      api.get(`/api/reports/${rid}`).then(({ report }) => {
+          let w = window.open('', '_blank', ...)
+      })
+    suggested_fix: >
+      方案 A：同步打开空窗口，异步填充内容。
+      方案 B：改用 Modal 展示报告，而非新窗口。
+    expected_impact: "修复查看报告功能的可用性"
+
+  - id: FE-002
+    severity: low
+    title: API 调用无 loading 状态 — 重复点击风险
+    file: frontend/src/app/scan/page.tsx
+    lines: "157-172"
+    effort: small
+    description: >
+      "查看完整报告"按钮点击后无 loading 状态，无 disabled 状态。
+      等待 API 响应时用户可多次点击，触发重复请求。
+    suggested_fix: >
+      添加 useState 管理 loading 状态，请求期间 disabled 按钮并显示 spinner。
+    expected_impact: "防止重复请求，改善交互体验"
+
+  - id: FE-003
+    severity: medium
+    title: scanStore 无请求去重 — 重复创建轮询定时器
+    file: frontend/src/lib/scanStore.ts
+    lines: "49-74"
+    effort: small
+    description: >
+      pollProgress() 被调用时未清除旧定时器就创建新的。
+      React Strict Mode（dev）或组件重复挂载时可能创建多个定时器并发轮询。
+    current_code: >
+      // scanStore.ts:51
+      timerId = window.setInterval(() => pollProgress(), 1000)  // 未先 stopPolling
+    suggested_fix: >
+      在 pollProgress() 开头调用 stopPolling() 清除旧定时器。
+    expected_impact: "消除重复轮询造成的请求风暴"
+
+  - id: FE-004
+    severity: medium
+    title: setInterval 回调闭包捕获过期状态
+    file: frontend/src/lib/scanStore.ts
+    lines: "51-74"
+    effort: small
+    description: >
+      异步回调内部读取的 state 可能在闭包创建时已过期。
+      如果 continueScan() 等操作在轮询期间修改状态，
+      通知给 listener 的状态可能不正确。
+    suggested_fix: >
+      将模块级 state 改为 useRef 或使用 reducer 模式，
+      确保每次读写都是最新状态。
+    expected_impact: "状态同步准确性提升"
+
+  - id: FE-005
+    severity: medium
+    title: 模块级可变状态 — React Strict Mode 下重复
+    file: frontend/src/lib/scanStore.ts
+    lines: "16-23"
+    effort: small
+    description: >
+      state, listeners, timerId, scanId 等均为模块级 let 变量。
+      React Strict Mode 中 effects 运行两次可能导致状态混乱。
+    suggested_fix: >
+      封装为 class 实例或使用 useRef 管理单例状态。
+    expected_impact: "开发环境行为与生产环境一致"
+
+  - id: FE-006
+    severity: low
+    title: "API 调用 timeout: 0 — 无超时保护"
+    file: frontend/src/lib/scanStore.ts
+    lines: "53, 88, 119"
+    effort: small
+    description: >
+      多处 fetch 调用使用 { timeout: 0 }（无限等待）。
+      如果后端无响应，用户看到无限 spinner，无错误反馈。
+    suggested_fix: >
+      设置合理超时（polling 30s，start 10s），超时后显示错误提示。
+    expected_impact: "用户及时收到超时反馈"
+
+  - id: FE-007
+    severity: low
+    title: 错误处理使用 e.message — 非 Error 对象时 undefined
+    file: frontend/src/lib/scanStore.ts
+    lines: "69-72"
+    effort: small
+    description: >
+      catch(e: any) 后使用 e.message 获取错误信息。
+      如果 catch 到的是字符串或非 Error 对象，e.message 为 undefined。
+    suggested_fix: >
+      改为 e?.message || String(e)
+    expected_impact: "错误信息始终可显示"
+
+  - id: FE-008
+    severity: low
+    title: 日期工具函数重复定义
+    file: frontend/src/app/scan/page.tsx, frontend/src/lib/scanStore.ts
+    lines: "scan/page.tsx:12-16 / scanStore.ts:25-26"
+    effort: small
+    description: >
+      today() 和 dateMinusDays() 在两个文件中重复定义。
+    suggested_fix: >
+      抽取到 src/lib/dateUtils.ts 统一导入。
+    expected_impact: "消除重复代码"
+
+# ============================================================================
+# 六、构建与部署
+# ============================================================================
+
+build:
+  - id: BLD-001
+    severity: critical
+    title: 构建脚本无前置条件校验 — npm/node 缺失时静默失败
+    file: 构建发布.bat
+    lines: "10-28"
+    effort: small
+    description: >
+      脚本假设 npm/node 在 PATH 中，假设 frontend/ 目录存在。
+      任一条件不满足时静默跳过或报错信息不明确。
+    suggested_fix: >
+      在脚本开头添加：
+      where npm >nul 2>nul || (echo ERROR: npm not found & exit /b 1)
+      if not exist "frontend\package.json" (echo ERROR: frontend not found & exit /b 1)
+    expected_impact: "前置条件缺失时立即明确报错"
+
+  - id: BLD-002
+    severity: high
+    title: npm build 失败时可能残留错误工作目录
+    file: 构建发布.bat
+    lines: "20-28"
+    effort: small
+    description: >
+      cd frontend 后如果 npm run build 失败，exit 时未 cd ..，
+      导致后续操作在错误目录执行。应使用 pushd/popd 确保目录恢复。
+    suggested_fix: >
+      使用 pushd frontend & ... & popd 替代 cd frontend & ... & cd ..
+    expected_impact: "构建失败不污染工作目录"
+
+  - id: BLD-003
+    severity: medium
+    title: pause 阻塞 CI/CD 管道
+    file: 构建发布.bat
+    lines: "26"
+    effort: small
+    description: >
+      构建失败后 pause 等待用户按键。在 CI/CD 环境无终端交互时永久挂起。
+    suggested_fix: >
+      检查 NO_INTERACTIVE 或 CI 环境变量，存在时跳过 pause。
+    expected_impact: "构建脚本兼容 CI/CD 环境"
+
+  - id: BLD-004
+    severity: medium
+    title: 打包路径硬编码 — 无存在性校验
+    file: 构建发布.bat
+    lines: "34-53"
+    effort: small
+    description: >
+      xcopy 和 copy 命令假设源路径存在。如果 frontend\out 未生成
+      或 config.yaml 被删除，copy 静默跳过不报错，产出不完整的 zip。
+    suggested_fix: >
+      每个关键文件/目录复制前检查存在性，缺失时报错退出。
+    expected_impact: "确保发布的 zip 完整性"
+
+  - id: BLD-005
+    severity: low
+    title: 无构建版本号
+    file: 构建发布.bat
+    lines: "全文"
+    effort: small
+    description: >
+      输出 zip 固定命名为 SVN_AI_Review_V2.0.zip，
+      多次构建互相覆盖，无法追溯哪个 zip 对应哪个 git commit。
+    suggested_fix: >
+      zip 文件名包含 git commit hash 或日期时间戳。
+    expected_impact: "版本可追溯"
+
+# ============================================================================
+# 七、实施建议（已校准，按优先级重排）
+# ============================================================================
+#
+# status 说明:
+#   done     = 已修复
+#   partial  = 部分修复，仍需补完
+#   open     = 未开始
+#
+# 优先级策略:
+#   P0: 安全漏洞 + 数据丢失风险（必须立即修）
+#   P1: 性能瓶颈 + 高发故障（当前 sprint 修）
+#   P2: 架构改善（下个 sprint）
+#   P3: 体验打磨（穿插进行）
+# ============================================================================
+
+implementation_plan:
+  recalibrated_at: "2026-07-22"
+  already_done: "PERF-005, PERF-011, ARCH-008 (= 3 项已修)"
+  partial_done: "SEC-003, ARCH-004, REL-004, REL-005 (= 4 项部分修)"
+
+  phase_p0_hardening:
+    label: "P0：安全加固 + 稳定性（本 sprint，约 1 天）"
+    order:
+      - id: SEC-001
+        reason: "路径遍历可读取 config.yaml 中的 API key 引用 — 最高优先级"
+        effort: "5 行改动"
+      - id: PERF-007
+        reason: "SQLite WAL 模式是并发扫描的前置条件，5 行改动"
+        effort: "5 行改动"
+      - id: REL-008
+        reason: "_process_commit 缺 rollback 保护，单文件异常污染后续 commit"
+        effort: "~10 行改动"
+      - id: REL-004
+        reason: "LLM JSON 解析补充 markdown 代码块检测，消除 Skill 引擎的解析失败"
+        effort: "~15 行改动"
+      - id: FE-001
+        reason: "window.open 被拦截导致查看报告功能不可用 — 用户体验致命 bug"
+        effort: "~10 行改动"
+
+  phase_p1_performance:
+    label: "P1：性能核心（本 sprint，约 2 天）"
+    order:
+      - id: PERF-004
+        reason: "LLM 重试机制消除因 API 波动导致的审查结果丢失；依赖 PERF-007"
+        effort: "~20 行改动"
+      - id: PERF-001
+        reason: "并发扫描是最大的性能提升点（2-3x），依赖 PERF-007"
+        effort: "medium"
+      - id: PERF-006
+        reason: "数据库索引让历史报告查询从秒级降到毫秒级"
+        effort: "~20 行改动"
+      - id: PERF-002
+        reason: "LLM 客户端缓存复用 TCP 连接，节省 30-50s/次扫描"
+        effort: "~15 行改动"
+      - id: PERF-010
+        reason: "大文件 diff 上限防止 OOM，对 EDK2 仓库尤为重要"
+        effort: "~10 行改动"
+      - id: REL-009
+        reason: "不审查的文件只存 200 字节约 DB 空间 20-40%"
+        effort: "~5 行改动"
+
+  phase_p2_architecture:
+    label: "P2：架构改善（下个 sprint，约 3 天）"
+    order:
+      - id: REL-002
+        reason: "扫描取消机制 — 误触发的长扫描浪费资源，用户体验刚需"
+        effort: "medium"
+      - id: REL-003
+        reason: "异步端点防止长扫描阻塞其他 API 请求"
+        effort: "small"
+      - id: REL-001
+        reason: "非 daemon 线程 + graceful shutdown 防止数据丢失"
+        effort: "medium"
+      - id: SEC-002
+        reason: "最小认证（API Key header）保护内网操作安全"
+        effort: "large (简化版约2h)"
+      - id: PERF-003
+        reason: "LLM 文件级并发配合 PERF-001 实现两级并行"
+        effort: "medium"
+      - id: SEC-003
+        reason: "补完 SVN URL scheme 正则校验"
+        effort: "~5 行改动"
+      - id: ARCH-005
+        reason: "外键约束保障数据完整性"
+        effort: "small"
+      - id: REL-005
+        reason: "改进 LLM Prompt 添加 JSON schema 示例提升输出一致性"
+        effort: "small"
+
+  phase_p3_polish:
+    label: "P3：体验打磨 + 技术债（持续进行）"
+    order:
+      - id: FE-003
+        reason: "scanStore 定时器去重"
+      - id: FE-002
+        reason: "按钮 loading 状态"
+      - id: FE-004
+        reason: "闭包过期状态修复"
+      - id: FE-006
+        reason: "timeout:0 改合理值"
+      - id: FE-007
+        reason: "e.message 兼容性"
+      - id: FE-008
+        reason: "日期函数抽取"
+      - id: PERF-008
+        reason: "轮询指数退避"
+      - id: PERF-009
+        reason: "每 N 个 commit 新建 session"
+      - id: SEC-004
+        reason: "LLM api_base URL 校验"
+      - id: SEC-005
+        reason: "CORS 配置"
+      - id: SEC-006
+        reason: "api_key_ref 脱敏"
+      - id: SEC-007
+        reason: "日期参数格式校验"
+      - id: ARCH-001
+        reason: "依赖注入（大改，择机）"
+      - id: ARCH-002
+        reason: "Repository 层"
+      - id: ARCH-003
+        reason: "Alembic 迁移"
+      - id: ARCH-004
+        reason: "审查引擎注册表模式补完"
+      - id: ARCH-006
+        reason: "配置缓存线程安全"
+      - id: ARCH-007
+        reason: "datetime.utcnow 替换"
+      - id: ARCH-009
+        reason: "engine 惰性初始化"
+      - id: REL-006
+        reason: "token 预算控制"
+      - id: REL-007
+        reason: "进度计数 +1"
+      - id: REL-010
+        reason: "shutdown 事件 dispose engine"
+      - id: BLD-001
+        reason: "构建脚本前置校验"
+      - id: BLD-002
+        reason: "pushd/popd"
+      - id: BLD-003
+        reason: "CI/CD 兼容"
+      - id: BLD-004
+        reason: "打包完整性校验"
+      - id: BLD-005
+        reason: "构建版本号"

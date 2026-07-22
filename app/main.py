@@ -15,7 +15,7 @@ from app.scheduler import scheduler, reload_schedule
 logger = setup_logging()
 
 app = FastAPI(title='SVN AI Review V2.0', version='2.0.0')
-STATIC_DIR = Path('app/static')
+STATIC_DIR = Path('app/static').resolve()
 STATIC_NEXT = STATIC_DIR / '_next'
 if STATIC_NEXT.exists():
     app.mount('/_next', StaticFiles(directory=str(STATIC_NEXT)), name='next')
@@ -45,8 +45,12 @@ def serve_page(page: str, request: Request):
     if not html_path.exists() and '/' not in path:
         html_path = STATIC_DIR / path / 'index.html'
 
-    if html_path.exists():
-        return FileResponse(html_path)
+    resolved = html_path.resolve()
+    if not str(resolved).startswith(str(STATIC_DIR)):
+        return HTMLResponse('Not Found', status_code=404)
+
+    if resolved.exists():
+        return FileResponse(resolved)
 
     not_found = STATIC_DIR / '404.html'
     if not_found.exists():

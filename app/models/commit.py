@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Column, Integer, String, Text, DateTime, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Text, DateTime, UniqueConstraint, Index
 
 from app.database import Base
 
@@ -19,4 +19,6 @@ class SvnCommit(Base):
 
     __table_args__ = (
         UniqueConstraint('project_name', 'revision', name='uix_project_revision'),
+        Index('ix_svn_commits_author', 'author'),
+        Index('ix_svn_commits_commit_time', 'commit_time'),
     )
