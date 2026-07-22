@@ -11,6 +11,7 @@ from app.models.changed_file import ChangedFile
 from app.services.svn_client import svn_logs, filter_logs_by_real_commit_date, svn_diff_safe, svn_diff_summarize, split_diff, should_review, parse_svn_time_to_local
 from app.services.review.rule_engine import rule_review
 from app.services.review.llm import llm_review
+from app.services.review.skill_engine import review as skill_review
 from app.services.report_builder import create_report
 from app.services.notifier import send_notification
 
@@ -55,7 +56,8 @@ def _review_file(project, rev, author, file_path, diff_text, commit_message):
     issues = []
     try:
         for issue in rule_review(project, rev, author, file_path, diff_text) + \
-                     llm_review(project, rev, author, file_path, diff_text, commit_message):
+                     llm_review(project, rev, author, file_path, diff_text, commit_message) + \
+                     skill_review(project, rev, author, file_path, diff_text, commit_message):
             issues.append(ReviewIssue(**issue))
     except Exception as e:
         logger.error(f'Review failed for {project} r{rev} {file_path}: {e}')

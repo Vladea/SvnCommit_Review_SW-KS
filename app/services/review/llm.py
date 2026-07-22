@@ -94,6 +94,10 @@ class OpenAICompatibleClient:
             })
         return issues
 
+    def review_with_prompt(self, prompt):
+        content = self._chat(prompt)
+        return self._extract_json(content)
+
     def test_connection(self):
         start = time.time()
         try:

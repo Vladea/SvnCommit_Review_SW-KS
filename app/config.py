@@ -36,7 +36,7 @@ DEFAULTS = {
     ]},
     'scan': {
         'max_diff_chars_per_file': 12000,
-        'max_files_per_commit': 10,
+        'max_files_per_commit': 50,
         'include_extensions': [
             '.c', '.h', '.cpp', '.hpp', '.py',
             '.asl', '.inf', '.dsc', '.dec', '.vfr', '.uni',
@@ -52,6 +52,18 @@ DEFAULTS = {
         'default': '', 'fallback': '', 'concurrent': 3,
         'retry_count': 2, 'retry_delay': 5, 'providers': [],
     },
+    'skills': [
+        {
+            'id': 'uefi_format_align', 'name': '代码格式对齐', 'level': 'P4',
+            'enabled': True, 'file_types': ['.c', '.h', '.asl', '.vfr'],
+            'prompt': '你是 UEFI BIOS 代码审查专家。检查以下 diff 的格式问题：\n- 缩进是否统一（4 空格 / Tab 混用）\n- 大括号是否对齐\n- 是否有行尾多余空格\n只输出 JSON：{"issues":[{"line":N,"desc":"...","suggestion":"..."}]}',
+        },
+        {
+            'id': 'uefi_pointer_check', 'name': '指针安全检查', 'level': 'P2',
+            'enabled': True, 'file_types': ['.c', '.h'],
+            'prompt': '你是 UEFI BIOS 代码审查专家。检查以下 diff 的指针安全问题：\n- AllocatePool / AllocateZeroPool 调用后是否检查了返回 NULL\n- 指针解引用前是否有 NULL 判断\n- FreePool 后是否将指针置为 NULL\n如果 diff 上下文不足以完全判断，请在 desc 中标注"需全文件审查"。\n只输出 JSON：{"issues":[{"line":N,"desc":"...","suggestion":"..."}]}',
+        },
+    ],
     'notifications': {
         'teams': {'enabled': True, 'webhook_url_ref': 'TEAMS_WEBHOOK_URL'},
         'email': {'enabled': False, 'smtp_host': '', 'smtp_port': 587, 'smtp_user': '',
@@ -166,6 +178,10 @@ def rule_cfg() -> dict:
 
 def retry_cfg() -> dict:
     return scan_cfg().get('retry', {'max_retries': 3, 'delay': 5, 'backoff': 2})
+
+
+def skills_cfg() -> list[dict]:
+    return load_cfg().get('skills', [])
 
 
 def auth_args(url: str = '') -> list[str]:

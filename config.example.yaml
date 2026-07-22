@@ -35,7 +35,7 @@ scan:
     todo_marker: true
     debug_print: true
     memory_safety: true
-  max_files_per_commit: 10
+  max_files_per_commit: 50
   retry:
     max_retries: 3
     delay: 5
@@ -71,6 +71,30 @@ llm:
     model: gpt-4o
     enabled: false
     description: 最强大的通用模型，审查质量最高
+skills:
+- id: uefi_format_align
+  name: 代码格式对齐
+  level: P4
+  enabled: true
+  file_types: ['.c', '.h', '.asl', '.vfr']
+  prompt: |
+    你是 UEFI BIOS 代码审查专家。检查以下 diff 的格式问题：
+    - 缩进是否统一（4 空格 / Tab 混用）
+    - 大括号是否对齐
+    - 是否有行尾多余空格
+    只输出 JSON：{"issues":[{"line":N,"desc":"...","suggestion":"..."}]}
+- id: uefi_pointer_check
+  name: 指针安全检查
+  level: P2
+  enabled: true
+  file_types: ['.c', '.h']
+  prompt: |
+    你是 UEFI BIOS 代码审查专家。检查以下 diff 的指针安全问题：
+    - AllocatePool / AllocateZeroPool 调用后是否检查了返回 NULL
+    - 指针解引用前是否有 NULL 判断
+    - FreePool 后是否将指针置为 NULL
+    如果 diff 上下文不足以完全判断，请在 desc 中标注"需全文件审查"。
+    只输出 JSON：{"issues":[{"line":N,"desc":"...","suggestion":"..."}]}
 notifications:
   teams:
     enabled: true
