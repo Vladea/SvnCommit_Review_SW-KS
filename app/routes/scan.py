@@ -27,6 +27,7 @@ def scan_start(
     push_teams: bool = Query(True),
     max_commits: int | None = Query(None),
     preview: bool = Query(False),
+    force: bool = Query(False),
 ):
     matched_all, skipped_all, _errors = collect_commits(start_date, end_date, project_names)
 
@@ -52,7 +53,7 @@ def scan_start(
                     completed=data.get('completed', 0),
                 )
             result = run_range(start_date, end_date, project_names, push_teams,
-                               progress_callback=cb, max_commits=max_commits, scan_id=sid)
+                               progress_callback=cb, max_commits=max_commits, scan_id=sid, force=force)
             scan_progress.finish(sid, result)
         except Exception as e:
             scan_progress.fail(sid, e)

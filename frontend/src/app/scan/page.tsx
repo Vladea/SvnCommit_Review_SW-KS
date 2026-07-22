@@ -32,6 +32,7 @@ export default function ScanPage() {
   const [start, setStart] = useState(initStart);
   const [end, setEnd] = useState(initEnd);
   const [push, setPush] = useState(initPush);
+  const [force, setForce] = useState(false);
 
   const s = useScanStore();
 
@@ -59,7 +60,10 @@ export default function ScanPage() {
           <label className="flex items-center gap-2 text-sm text-muted pb-2">
             <input type="checkbox" checked={push} onChange={e => setPushPersist((e.target as HTMLInputElement).checked)} />推送通知
           </label>
-          <Button onClick={() => scanStore.doStartScan(start, end, push, true)} disabled={s.loading}>
+          <label className="flex items-center gap-2 text-sm text-orange-600 pb-2">
+            <input type="checkbox" checked={force} onChange={e => setForce((e.target as HTMLInputElement).checked)} />强制重扫
+          </label>
+          <Button onClick={() => scanStore.doStartScan(start, end, push, true, force)} disabled={s.loading}>
             {s.loading && s.phase !== 'scanning' ? '查询中...' : '开始扫描'}
           </Button>
         </div>
@@ -89,8 +93,8 @@ export default function ScanPage() {
             </p>
             <p className="text-muted text-sm mb-4">建议先预览前 5 个 Commit 快速验证配置</p>
             <div className="flex gap-3 justify-center">
-              <Button onClick={() => scanStore.continueScan(start, end, push)}>预览前 5 个</Button>
-              <Button variant="ghost" onClick={() => scanStore.doStartScan(start, end, push, false)}>
+              <Button onClick={() => scanStore.continueScan(start, end, push, force)}>预览前 5 个</Button>
+              <Button variant="ghost" onClick={() => scanStore.doStartScan(start, end, push, false, force)}>
                 直接扫描全部 ({s.startResp.total_commits})
               </Button>
             </div>

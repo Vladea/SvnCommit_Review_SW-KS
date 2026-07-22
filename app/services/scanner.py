@@ -74,15 +74,23 @@ def _review_file(project, rev, author, file_path, diff_text, commit_message):
     return issues
 
 
-def _process_commit(s, svn_url, log, progress_callback=None, completed=0, total=0):
+def _process_commit(s, svn_url, log, progress_callback=None, completed=0, total=0, force=False):
     name = log['project']
     rev = log['revision']
     max_files = int(scan_cfg().get('max_files_per_commit', 10))
     max_chars = int(scan_cfg().get('max_diff_chars_per_file', 12000))
     max_diff_bytes = int(scan_cfg().get('max_diff_bytes', 0))
 
-    if s.query(SvnCommit).filter_by(project_name=name, revision=rev).first():
+    existing = s.query(SvnCommit).filter_by(project_name=name, revision=rev).first()
+    if existing and not force:
         return None, True
+    if existing and force:
+        with _write_lock:
+            s.query(ReviewIssue).filter_by(project_name=name, revision=rev).delete()
+            s.query(ChangedFile).filter(ChangedFile.commit_id == existing.id).delete()
+            s.delete(existing)
+            s.flush()
+            s.commit()
 
     try:
         file_list = svn_diff_summarize(svn_url, rev)
@@ -147,12 +155,12 @@ def _process_commit(s, svn_url, log, progress_callback=None, completed=0, total=
             return {'project': name, 'revision': rev, 'author': log.get('author', 'unknown'), 'error': str(e)}, False
 
 
-def _thread_process_commit(svn_url, log, progress_callback, completed_counter, total, scan_id):
+def _thread_process_commit(svn_url, log, progress_callback, completed_counter, total, scan_id, force=False):
     if scan_id and scan_progress.is_cancelled(scan_id):
         raise ScanCancelledError()
     s = session()
     try:
-        result, ok = _process_commit(s, svn_url, log, progress_callback, completed_counter, total)
+        result, ok = _process_commit(s, svn_url, log, progress_callback, completed_counter, total, force=force)
         s.commit()
         return result, ok
     except Exception as e:
@@ -162,7 +170,7 @@ def _thread_process_commit(svn_url, log, progress_callback, completed_counter, t
         s.close()
 
 
-def run_range(start_date, end_date, project_names=None, push=True, progress_callback=None, max_commits=None, scan_id=None):
+def run_range(start_date, end_date, project_names=None, push=True, progress_callback=None, max_commits=None, scan_id=None, force=False):
     import threading
     matched, skipped, errors = collect_commits(start_date, end_date, project_names)
     new = []
@@ -187,7 +195,7 @@ def run_range(start_date, end_date, project_names=None, push=True, progress_call
                         data['completed'] = counter[0]
                         data['total'] = total
                         progress_callback(data)
-                fut = executor.submit(_thread_process_commit, log['svn_url'], log, progress_callback, 0, total, scan_id)
+                fut = executor.submit(_thread_process_commit, log['svn_url'], log, progress_callback, 0, total, scan_id, force)
                 futures[fut] = log
 
             for future in as_completed(futures):

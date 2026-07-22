@@ -27,7 +27,7 @@ const dateMinusDays = (d: number) => new Date(Date.now() - d * 86400000).toISOSt
 
 let _start = dateMinusDays(1);
 let _end = today();
-let _push = true;
+let _push = false;
 
 function getDates() {
   return { start: _start, end: _end, push: _push };
@@ -74,7 +74,7 @@ function pollProgress() {
   }, 1000);
 }
 
-async function doStartScan(start: string, end: string, push: boolean, preview: boolean) {
+async function doStartScan(start: string, end: string, push: boolean, preview: boolean, force: boolean = false) {
   stopPolling();
   state = { ...state, loading: true, error: '', result: null, progress: null, currentCommit: null };
   notify();
@@ -84,6 +84,7 @@ async function doStartScan(start: string, end: string, push: boolean, preview: b
       start_date: start, end_date: end, push_teams: String(push),
     });
     if (preview) params.set('preview', 'true');
+    if (force) params.set('force', 'true');
 
     const resp = await api.get<ScanStartResponse>(`/api/scan/start?${params.toString()}`, { timeout: 0 });
     state = { ...state, startResp: resp };
@@ -106,7 +107,7 @@ async function doStartScan(start: string, end: string, push: boolean, preview: b
   }
 }
 
-async function continueScan(start: string, end: string, push: boolean) {
+async function continueScan(start: string, end: string, push: boolean, force: boolean = false) {
   stopPolling();
   state = { ...state, loading: true, error: '', phase: 'scanning' };
   notify();
@@ -116,6 +117,7 @@ async function continueScan(start: string, end: string, push: boolean) {
       start_date: start, end_date: end, push_teams: String(push),
       max_commits: '5',
     });
+    if (force) params.set('force', 'true');
     const resp = await api.get<ScanStartResponse>(`/api/scan/start?${params.toString()}`, { timeout: 0 });
     if (resp.scan_id) {
       scanId = resp.scan_id;
