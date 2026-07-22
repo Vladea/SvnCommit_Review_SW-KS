@@ -52,12 +52,13 @@ def scan_start(
                     completed=data.get('completed', 0),
                 )
             result = run_range(start_date, end_date, project_names, push_teams,
-                               progress_callback=cb, max_commits=max_commits)
+                               progress_callback=cb, max_commits=max_commits, scan_id=sid)
             scan_progress.finish(sid, result)
         except Exception as e:
             scan_progress.fail(sid, e)
 
-    threading.Thread(target=_run, daemon=True).start()
+    t = threading.Thread(target=_run, daemon=False)
+    t.start()
     return {
         'scan_id': sid,
         'total_commits': total,
@@ -71,3 +72,9 @@ def scan_start(
 @router.get('/scan/progress/{scan_id}')
 def scan_progress_route(scan_id: str):
     return scan_progress.get(scan_id)
+
+
+@router.post('/scan/cancel/{scan_id}')
+def scan_cancel(scan_id: str):
+    scan_progress.cancel(scan_id)
+    return {'scan_id': scan_id, 'cancelled': True}

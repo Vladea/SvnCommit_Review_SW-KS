@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text, Index
+from sqlalchemy import Column, Integer, String, Text, ForeignKey
 
 from app.database import Base
 
@@ -7,7 +7,7 @@ class ChangedFile(Base):
     __tablename__ = 'changed_files'
 
     id = Column(Integer, primary_key=True)
-    commit_id = Column(Integer, nullable=False, index=True)
+    commit_id = Column(Integer, ForeignKey('svn_commits.id'), nullable=False, index=True)
     file_path = Column(Text, default='')
     change_type = Column(String, default='M')
     diff_text = Column(Text, default='')

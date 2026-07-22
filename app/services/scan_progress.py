@@ -69,6 +69,19 @@ def fail(sid, error):
             _store[sid]['error'] = str(error)
 
 
+def cancel(sid):
+    with _lock:
+        if sid in _store:
+            _store[sid]['status'] = 'cancelled'
+            _store[sid]['cancelled'] = True
+
+
+def is_cancelled(sid):
+    with _lock:
+        entry = _store.get(sid, {})
+        return entry.get('cancelled', False)
+
+
 def _cleanup():
     cutoff = datetime.utcnow() - _EXPIRE
     with _lock:

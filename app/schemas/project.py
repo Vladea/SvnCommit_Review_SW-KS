@@ -1,4 +1,6 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+VALID_URL_PREFIXES = ('svn://', 'svn+ssh://', 'http://', 'https://', 'file://')
 
 
 class ProjectRequest(BaseModel):
@@ -8,3 +10,12 @@ class ProjectRequest(BaseModel):
     owner_group: str = ''
     scan_window_days: int = 1
     teams_webhook_url: str = ''
+
+    @field_validator('svn_url')
+    @classmethod
+    def validate_url_scheme(cls, v: str):
+        if not v.startswith(VALID_URL_PREFIXES):
+            raise ValueError(f'SVN URL 必须以 {", ".join(VALID_URL_PREFIXES)} 开头')
+        if '--' in v:
+            raise ValueError('SVN URL 不能包含命令行标志')
+        return v

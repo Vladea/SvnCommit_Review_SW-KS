@@ -2,7 +2,7 @@ import logging
 import os
 from pathlib import Path
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse
 
@@ -14,7 +14,19 @@ from app.scheduler import scheduler, reload_schedule
 
 logger = setup_logging()
 
+API_KEY = os.getenv('API_KEY', '')
+
 app = FastAPI(title='SVN AI Review V2.0', version='2.0.0')
+
+if API_KEY:
+    @app.middleware('http')
+    async def api_key_middleware(request: Request, call_next):
+        if request.url.path.startswith('/api/'):
+            key = request.headers.get('X-API-Key', '')
+            if key != API_KEY:
+                return HTMLResponse('Unauthorized', status_code=401)
+        return await call_next(request)
+
 STATIC_DIR = Path('app/static').resolve()
 STATIC_NEXT = STATIC_DIR / '_next'
 if STATIC_NEXT.exists():

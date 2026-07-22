@@ -1,5 +1,6 @@
 import json
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 
@@ -15,8 +16,16 @@ from app.services.review.llm import llm_review
 from app.services.review.skill_engine import review as skill_review
 from app.services.report_builder import create_report
 from app.services.notifier import send_notification
+from app.services import scan_progress
 
 logger = logging.getLogger('svn_ai_review')
+
+
+class ScanCancelledError(Exception):
+    pass
+
+
+_write_lock = threading.Lock()
 
 
 def collect_commits(start_date, end_date, project_names=None):
@@ -93,51 +102,54 @@ def _process_commit(s, svn_url, log, progress_callback=None, completed=0, total=
 
     diff_map = split_diff(raw)
 
-    try:
-        c = SvnCommit(
-            project_name=name, revision=rev,
-            author=log.get('author', ''),
-            commit_time=parse_svn_time_to_local(log.get('commit_time')) or datetime.utcnow(),
-            message=log.get('message', ''),
-            changed_file_count=len(diff_map)
-        )
+    with _write_lock:
         try:
-            s.add(c)
-            s.flush()
+            c = SvnCommit(
+                project_name=name, revision=rev,
+                author=log.get('author', ''),
+                commit_time=parse_svn_time_to_local(log.get('commit_time')) or datetime.utcnow(),
+                message=log.get('message', ''),
+                changed_file_count=len(diff_map)
+            )
+            try:
+                s.add(c)
+                s.flush()
+            except IntegrityError:
+                s.rollback()
+                logger.info(f'Project [{name}] rev [{rev}] already scanned, skipped')
+                return None, True
+
+            for fp, diff in diff_map.items():
+                need = 1 if should_review(fp) else 0
+                short = diff[:max_chars] if need else diff[:200]
+
+                s.add(ChangedFile(
+                    commit_id=c.id, file_path=fp, diff_text=short,
+                    diff_size=len(diff), need_review=need
+                ))
+
+                if progress_callback:
+                    progress_callback({'phase': 'scanning', 'project': name, 'revision': rev,
+                                       'file': fp, 'completed': completed, 'total': total})
+
+                if need:
+                    for issue in _review_file(name, rev, log.get('author', ''), fp, short, log.get('message', '')):
+                        s.add(issue)
+            s.commit()
+            return c, True
         except IntegrityError:
             s.rollback()
             logger.info(f'Project [{name}] rev [{rev}] already scanned, skipped')
             return None, True
-
-        for fp, diff in diff_map.items():
-            need = 1 if should_review(fp) else 0
-            short = diff[:max_chars] if need else diff[:200]
-
-            s.add(ChangedFile(
-                commit_id=c.id, file_path=fp, diff_text=short,
-                diff_size=len(diff), need_review=need
-            ))
-
-            if progress_callback:
-                progress_callback({'phase': 'scanning', 'project': name, 'revision': rev,
-                                   'file': fp, 'completed': completed, 'total': total})
-
-            if need:
-                for issue in _review_file(name, rev, log.get('author', ''), fp, short, log.get('message', '')):
-                    s.add(issue)
-        s.commit()
-        return c, True
-    except IntegrityError:
-        s.rollback()
-        logger.info(f'Project [{name}] rev [{rev}] already scanned, skipped')
-        return None, True
-    except Exception as e:
-        s.rollback()
-        logger.error(f'Project [{name}] rev [{rev}] processing error: {e}')
-        return {'project': name, 'revision': rev, 'author': log.get('author', 'unknown'), 'error': str(e)}, False
+        except Exception as e:
+            s.rollback()
+            logger.error(f'Project [{name}] rev [{rev}] processing error: {e}')
+            return {'project': name, 'revision': rev, 'author': log.get('author', 'unknown'), 'error': str(e)}, False
 
 
-def _thread_process_commit(svn_url, log, progress_callback, completed_counter, total):
+def _thread_process_commit(svn_url, log, progress_callback, completed_counter, total, scan_id):
+    if scan_id and scan_progress.is_cancelled(scan_id):
+        raise ScanCancelledError()
     s = session()
     try:
         result, ok = _process_commit(s, svn_url, log, progress_callback, completed_counter, total)
@@ -145,12 +157,12 @@ def _thread_process_commit(svn_url, log, progress_callback, completed_counter, t
         return result, ok
     except Exception as e:
         s.rollback()
-        return {'project': log['project'], 'revision': log['revision'], 'author': log.get('author', 'unknown'), 'error': str(e)}, False
+        raise
     finally:
         s.close()
 
 
-def run_range(start_date, end_date, project_names=None, push=True, progress_callback=None, max_commits=None):
+def run_range(start_date, end_date, project_names=None, push=True, progress_callback=None, max_commits=None, scan_id=None):
     import threading
     matched, skipped, errors = collect_commits(start_date, end_date, project_names)
     new = []
@@ -175,11 +187,24 @@ def run_range(start_date, end_date, project_names=None, push=True, progress_call
                         data['completed'] = counter[0]
                         data['total'] = total
                         progress_callback(data)
-                fut = executor.submit(_thread_process_commit, log['svn_url'], log, progress_callback, 0, total)
+                fut = executor.submit(_thread_process_commit, log['svn_url'], log, progress_callback, 0, total, scan_id)
                 futures[fut] = log
 
             for future in as_completed(futures):
-                result, ok = future.result()
+                if scan_id and scan_progress.is_cancelled(scan_id):
+                    for f in futures:
+                        f.cancel()
+                    break
+                try:
+                    result, ok = future.result()
+                except ScanCancelledError:
+                    for f in futures:
+                        f.cancel()
+                    scan_progress.fail(scan_id, '扫描已被取消')
+                    return {'new_commit_count': len(new), 'matched_revision_count': total,
+                            'skipped_by_date_count': len(skipped), 'report_id': 0,
+                            'errors': errors, 'matched_logs': [],
+                            'skipped_logs': skipped[:50], 'report': '扫描已被取消'}
                 if result is not None and not ok:
                     errors.append(result)
                 elif result is not None:
